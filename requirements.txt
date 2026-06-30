@@ -1,0 +1,6 @@
+flask
+gunicorn
+requests
+pytz
+yfinance
+APScheduler

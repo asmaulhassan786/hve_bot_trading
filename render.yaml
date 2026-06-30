@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: hve-action
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: ALPACA_BASE_URL
+        value: https://paper-api.alpaca.markets/v2
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET
+        sync: false
+    disk:
+      name: hve-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

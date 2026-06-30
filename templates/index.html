@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HVE Action</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #ffffff;
+    --bg2:      #f5f5f4;
+    --bg3:      #efefed;
+    --border:   rgba(0,0,0,0.1);
+    --border2:  rgba(0,0,0,0.18);
+    --text:     #1a1a18;
+    --text2:    #5a5a57;
+    --text3:    #9a9a96;
+    --green:    #2d7d3a;
+    --green-bg: #eaf3de;
+    --red:      #a32d2d;
+    --red-bg:   #fcebeb;
+    --blue:     #185fa5;
+    --blue-bg:  #e6f1fb;
+    --amber:    #854f0b;
+    --amber-bg: #faeeda;
+    --radius:   8px;
+    --radius-lg:12px;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg3);
+    color: var(--text);
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── Top bar ── */
+  .topbar {
+    background: var(--bg);
+    border-bottom: 0.5px solid var(--border);
+    padding: 0 24px;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .logo svg { width: 20px; height: 20px; }
+  .conn-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #ccc;
+  }
+  .dot.ok  { background: #3b6d11; }
+  .dot.err { background: var(--red); }
+
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 3px 10px;
+    border-radius: var(--radius);
+  }
+  .badge-paper { background: var(--amber-bg); color: var(--amber); }
+  .edit-btn {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; color: var(--text2);
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 5px 12px;
+    cursor: pointer;
+    background: var(--bg);
+    transition: background 0.15s;
+  }
+  .edit-btn:hover { background: var(--bg2); }
+  .edit-btn.active { background: var(--blue-bg); color: var(--blue); border-color: #b5d4f4; }
+
+  /* ── Layout ── */
+  .main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px 20px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--bg);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 18px 20px;
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text3);
+  }
+
+  /* ── Metrics ── */
+  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+  .metric {
+    background: var(--bg2);
+    border-radius: var(--radius);
+    padding: 14px;
+  }
+  .metric-label { font-size: 11px; color: var(--text3); margin-bottom: 6px; }
+  .metric-value { font-size: 22px; font-weight: 600; color: var(--text); line-height: 1; }
+  .metric-sub   { font-size: 11px; color: var(--text3); margin-top: 4px; }
+  .metric-value.green { color: var(--green); }
+  .metric-value.red   { color: var(--red); }
+
+  /* ── Ticker list ── */
+  .ticker-controls { display: flex; flex-direction: column; gap: 12px; }
+  .ticker-input-row { display: flex; gap: 8px; }
+  .ticker-input-row input {
+    flex: 1;
+    height: 36px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 0 12px;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+    text-transform: uppercase;
+  }
+  .ticker-input-row input:focus { border-color: #85b7eb; box-shadow: 0 0 0 3px rgba(55,138,221,0.12); }
+  .ticker-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 32px; }
+  .chip {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--bg2);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 5px 10px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .chip-remove {
+    color: var(--text3);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    border: none;
+    background: none;
+    padding: 0;
+  }
+  .chip-remove:hover { color: var(--red); }
+  .chip-empty { font-size: 12px; color: var(--text3); padding: 6px 0; }
+
+  .schedule-row {
+    display: flex; align-items: center; gap: 10px;
+    padding-top: 12px;
+    border-top: 0.5px solid var(--border);
+    font-size: 13px;
+    color: var(--text2);
+  }
+  .schedule-row select, .schedule-row input[type=time] {
+    height: 32px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 0 10px;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+  }
+
+  /* ── Sync bar ── */
+  .sync-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg2);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 12px;
+    color: var(--text2);
+    gap: 12px;
+  }
+  .sync-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .sync-time {
+    display: flex; align-items: center; gap: 5px;
+    background: var(--bg);
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 3px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .sync-time .ok-icon { color: var(--green); }
+  .countdown { color: var(--text3); }
+
+  /* ── Positions table ── */
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    table-layout: fixed;
+    min-width: 820px;
+  }
+  th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text3);
+    padding: 0 8px 10px 0;
+    border-bottom: 0.5px solid var(--border);
+    white-space: nowrap;
+  }
+  td {
+    padding: 11px 8px 11px 0;
+    border-bottom: 0.5px solid var(--border);
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  .sym { font-weight: 600; font-size: 14px; }
+  .green-text { color: var(--green); }
+  .red-text   { color: var(--red); }
+
+  .stop-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: var(--radius);
+  }
+  .stop-active  { background: var(--green-bg); color: var(--green); }
+  .stop-missing { background: var(--red-bg);   color: var(--red); }
+  .stop-be      { background: var(--blue-bg);  color: var(--blue); }
+
+  .no-positions {
+    text-align: center;
+    color: var(--text3);
+    padding: 32px 0;
+    font-size: 13px;
+  }
+
+  /* ── Bottom grid ── */
+  .bottom-grid {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+
+  /* ── Mode toggle ── */
+  .mode-toggle {
+    display: flex;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 8px 0;
+    font-size: 13px;
+    text-align: center;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    color: var(--text2);
+    transition: background 0.15s, color 0.15s;
+  }
+  .mode-btn.active {
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 500;
+    box-shadow: 0 0 0 0.5px var(--border2) inset;
+  }
+  .mode-info {
+    font-size: 12px;
+    color: var(--text3);
+    margin-bottom: 14px;
+    padding: 8px 10px;
+    background: var(--bg2);
+    border-radius: var(--radius);
+    line-height: 1.5;
+  }
+
+  /* ── Action buttons ── */
+  .action-btns { display: flex; flex-direction: column; gap: 7px; }
+  .action-btn {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: var(--radius);
+    cursor: pointer;
+    border: 0.5px solid var(--border2);
+    background: var(--bg);
+    color: var(--text);
+    text-align: left;
+    transition: background 0.15s;
+  }
+  .action-btn:hover { background: var(--bg2); }
+  .action-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .action-btn.primary { color: var(--blue);  border-color: #85b7eb; background: var(--blue-bg); }
+  .action-btn.danger  { color: var(--red);   border-color: #f09595; background: var(--red-bg); }
+  .action-btn.primary:hover { background: #c8e1f6; }
+  .action-btn.danger:hover  { background: #f7c1c1; }
+  .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Row action buttons ── */
+  .row-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    border: 0.5px solid var(--border2);
+    background: var(--bg);
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .row-btn:hover { background: var(--bg2); }
+  .row-btn.warn { color: var(--red); border-color: #f09595; background: var(--red-bg); }
+
+  /* ── Log ── */
+  .log-wrap {
+    background: #1a1a18;
+    border-radius: var(--radius);
+    padding: 12px;
+    font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+    font-size: 11px;
+    color: #c8c8c4;
+    height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .log-line { display: flex; gap: 10px; line-height: 1.5; }
+  .log-ts   { color: #555552; min-width: 80px; flex-shrink: 0; }
+  .log-ok   { color: #97c459; }
+  .log-warn { color: #ef9f27; }
+  .log-error{ color: #e24b4a; }
+  .log-info { color: #85b7eb; }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 999;
+  }
+  .modal {
+    background: var(--bg);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    width: 380px;
+    max-width: 90vw;
+  }
+  .modal h3 { font-size: 15px; margin-bottom: 4px; }
+  .modal p  { font-size: 13px; color: var(--text2); margin-bottom: 16px; }
+  .modal label { font-size: 12px; color: var(--text2); display: block; margin-bottom: 5px; }
+  .modal input {
+    width: 100%;
+    height: 36px;
+    border: 0.5px solid var(--border2);
+    border-radius: var(--radius);
+    padding: 0 12px;
+    font-size: 13px;
+    background: var(--bg);
+    color: var(--text);
+    margin-bottom: 16px;
+    outline: none;
+  }
+  .modal input:focus { border-color: #85b7eb; box-shadow: 0 0 0 3px rgba(55,138,221,0.12); }
+  .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Buttons ── */
+  button.btn {
+    height: 34px;
+    padding: 0 16px;
+    font-size: 13px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    border: 0.5px solid var(--border2);
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  button.btn:hover { background: var(--bg2); }
+  button.btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+  button.btn.primary:hover { background: #0c4479; }
+  button.btn.danger  { background: var(--red-bg); color: var(--red); border-color: #f09595; }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    font-size: 11px;
+    color: var(--text3);
+    padding: 8px 0;
+  }
+
+  /* ── Toast ── */
+  .toast {
+    position: fixed;
+    bottom: 24px; right: 24px;
+    padding: 10px 18px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    z-index: 1000;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.ok  { background: var(--green-bg); color: var(--green); border: 0.5px solid #c0dd97; }
+  .toast.err { background: var(--red-bg);   color: var(--red);   border: 0.5px solid #f09595; }
+
+  @media (max-width: 860px) {
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .bottom-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div class="topbar">
+  <div class="logo">
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+      <polygon points="10,2 13,8 19,9 14.5,13.5 15.5,19.5 10,17 4.5,19.5 5.5,13.5 1,9 7,8" />
+    </svg>
+    HVE Action
+  </div>
+  <div class="conn-status">
+    <span class="dot" id="conn-dot"></span>
+    <span id="conn-label">Connecting…</span>
+  </div>
+  <div class="topbar-right">
+    <span class="badge badge-paper">Paper trading</span>
+    <button class="edit-btn" id="edit-btn" onclick="toggleEdit()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      Edit mode
+    </button>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- Metrics -->
+  <div class="metrics" id="metrics">
+    <div class="metric">
+      <div class="metric-label">Portfolio value</div>
+      <div class="metric-value" id="m-portfolio">—</div>
+      <div class="metric-sub">as of last sync</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Cash available</div>
+      <div class="metric-value" id="m-cash">—</div>
+      <div class="metric-sub">buying power</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Open positions</div>
+      <div class="metric-value" id="m-positions">—</div>
+      <div class="metric-sub" id="m-mktval">market value</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Total unrealized P&L</div>
+      <div class="metric-value" id="m-pnl">—</div>
+      <div class="metric-sub" id="m-pnlpct"></div>
+    </div>
+  </div>
+
+  <!-- Scan list -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Today's scan list</span>
+      <span style="font-size:12px;color:var(--text3)" id="next-scan-label"></span>
+    </div>
+    <div class="ticker-controls">
+      <div class="ticker-input-row">
+        <input type="text" id="ticker-input" placeholder="Add ticker (e.g. NVDA)" maxlength="10"
+               onkeydown="if(event.key==='Enter') addTicker()" />
+        <button class="btn" onclick="addTicker()">+ Add</button>
+        <button class="btn" onclick="clearTickers()" id="clear-btn" style="color:var(--text3)">Clear all</button>
+      </div>
+      <div class="ticker-chips" id="ticker-chips">
+        <span class="chip-empty">No tickers yet — add some above</span>
+      </div>
+      <div class="schedule-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Scan time (ET):
+        <input type="time" id="scan-time" value="15:50" onchange="saveSettings()" />
+        &nbsp;&nbsp;Mode:
+        <select id="mode-select" onchange="saveSettings()">
+          <option value="manual">Manual — I trigger scans</option>
+          <option value="automated">Automated — run at scheduled time</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Positions -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Positions &amp; stop loss</span>
+      <button class="btn" onclick="syncPositions()" id="sync-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Sync now
+      </button>
+    </div>
+
+    <div class="sync-bar">
+      <div class="sync-left">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text3)"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Last synced:
+        <div class="sync-time">
+          <span class="ok-icon">✓</span>
+          <span id="synced-at">—</span>
+        </div>
+        <span class="countdown" id="next-refresh"></span>
+      </div>
+      <span style="font-size:11px;color:var(--text3)">Auto-refreshes every 60s</span>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:9%">Symbol</th>
+            <th style="width:8%">Qty</th>
+            <th style="width:9%">Entry</th>
+            <th style="width:9%">Current</th>
+            <th style="width:10%">Mkt value</th>
+            <th style="width:14%">Unrealized P&L</th>
+            <th style="width:10%">Stop price</th>
+            <th style="width:13%">Stop type</th>
+            <th style="width:10%">Stop status</th>
+            <th style="width:8%">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="positions-tbody">
+          <tr><td colspan="10" class="no-positions">Loading positions…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Controls + Log -->
+  <div class="bottom-grid">
+
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px">
+        <span class="card-title">Trading controls</span>
+      </div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="mode-manual-btn" onclick="setMode('manual')">Manual</button>
+        <button class="mode-btn"        id="mode-auto-btn"   onclick="setMode('automated')">Automated</button>
+      </div>
+      <div class="mode-info" id="mode-info">
+        Manual mode — scans only run when you click "Run scan now".
+      </div>
+      <div class="action-btns">
+        <button class="action-btn primary" onclick="runScan()" id="scan-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run scan now
+        </button>
+        <button class="action-btn" onclick="placeMissingStops()" id="missing-stops-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Place missing stop orders
+        </button>
+        <button class="action-btn" onclick="syncPositions()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Sync positions from Alpaca
+        </button>
+        <button class="action-btn danger" onclick="confirmCloseAll()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          Close all positions
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header" style="margin-bottom:10px">
+        <span class="card-title">Activity log</span>
+        <button class="btn" style="font-size:11px;padding:3px 10px;height:auto" onclick="clearLog()">Clear</button>
+      </div>
+      <div class="log-wrap" id="log-wrap"></div>
+    </div>
+
+  </div>
+
+  <div class="footer" id="footer-info">Account — · Paper trading</div>
+</div>
+
+<!-- Stop order modal -->
+<div class="modal-overlay" id="stop-modal" style="display:none">
+  <div class="modal">
+    <h3 id="modal-title">Set stop order</h3>
+    <p id="modal-desc"></p>
+    <label>Stop price ($)</label>
+    <input type="number" id="modal-stop-price" step="0.01" min="0" placeholder="0.00" />
+    <div class="modal-btns">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitStop()">Place stop order</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let positions = [];
+let tickers   = [];
+let mode      = 'manual';
+let scanTime  = '15:50';
+let editMode  = false;
+let syncedAt  = null;
+let refreshCountdown = 60;
+let modalCtx  = null;
+let countdownTimer = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  await Promise.all([loadTickers(), syncPositions(), loadAccount(), loadLog()]);
+  startCountdown();
+  setInterval(autoRefresh, 60000);
+  setInterval(loadLog, 15000);
+}
+
+async function autoRefresh() {
+  await Promise.all([syncPositions(), loadAccount()]);
+}
+
+function startCountdown() {
+  refreshCountdown = 60;
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    refreshCountdown--;
+    const el = document.getElementById('next-refresh');
+    if (el) el.textContent = `· next refresh in ${refreshCountdown}s`;
+    if (refreshCountdown <= 0) refreshCountdown = 60;
+  }, 1000);
+}
+
+// ── Account ───────────────────────────────────────────────────────────────────
+async function loadAccount() {
+  try {
+    const r = await fetch('/api/account');
+    const d = await r.json();
+    if (d.error) return;
+    document.getElementById('m-portfolio').textContent = fmt(d.portfolio_value);
+    document.getElementById('m-cash').textContent      = fmt(d.cash);
+    document.getElementById('footer-info').textContent =
+      `Account ${d.account_number || '—'} · Paper trading`;
+    setConn(true);
+  } catch { setConn(false); }
+}
+
+function setConn(ok) {
+  document.getElementById('conn-dot').className   = 'dot ' + (ok ? 'ok' : 'err');
+  document.getElementById('conn-label').textContent = ok ? 'Connected to Alpaca' : 'Connection error';
+}
+
+// ── Positions ─────────────────────────────────────────────────────────────────
+async function syncPositions() {
+  document.getElementById('sync-btn').disabled = true;
+  try {
+    const r = await fetch('/api/positions');
+    const d = await r.json();
+    if (d.error) { addLog(d.error, 'error'); return; }
+    positions = d.positions;
+    syncedAt  = d.synced_at;
+    document.getElementById('synced-at').textContent = syncedAt;
+    renderPositions();
+    updateMetrics();
+    refreshCountdown = 60;
+  } catch(e) {
+    addLog('Sync failed: ' + e.message, 'error');
+  } finally {
+    document.getElementById('sync-btn').disabled = false;
+  }
+}
+
+function renderPositions() {
+  const tbody = document.getElementById('positions-tbody');
+  if (!positions.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="no-positions">No open positions</td></tr>';
+    return;
+  }
+  tbody.innerHTML = positions.map(p => {
+    const plSign  = p.unrealized_pl >= 0 ? '+' : '';
+    const plClass = p.unrealized_pl >= 0 ? 'green-text' : 'red-text';
+    const stopBadge = p.stop
+      ? `<span class="stop-badge ${p.stop_label === 'Break-even' ? 'stop-be' : 'stop-active'}">${p.stop_label === 'Break-even' ? 'Break-even' : 'Active'}</span>`
+      : `<span class="stop-badge stop-missing">No stop</span>`;
+    const stopPrice = p.stop ? '$' + parseFloat(p.stop.stop_price).toFixed(2) : '—';
+    const stopLabel = p.stop_label || '—';
+    const actions = p.stop
+      ? `<button class="row-btn" onclick="openEditStop('${p.symbol}', ${p.qty}, ${p.stop.stop_price}, '${p.stop.id}')">Edit stop</button>`
+      : `<button class="row-btn warn" onclick="openSetStop('${p.symbol}', ${p.qty}, ${p.entry_price}, ${p.current_price})">Set stop</button>`;
+
+    return `<tr>
+      <td class="sym">${p.symbol}</td>
+      <td>${p.qty.toFixed(4)}</td>
+      <td>$${p.entry_price.toFixed(2)}</td>
+      <td>$${p.current_price.toFixed(2)}</td>
+      <td>$${p.market_value.toFixed(2)}</td>
+      <td class="${plClass}">${plSign}$${Math.abs(p.unrealized_pl).toFixed(2)} <span style="font-size:11px">${plSign}${Math.abs(p.unrealized_plpc).toFixed(1)}%</span></td>
+      <td>${stopPrice}</td>
+      <td style="font-size:11px;color:var(--text2)">${stopLabel}</td>
+      <td>${stopBadge}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function updateMetrics() {
+  const count   = positions.length;
+  const mktVal  = positions.reduce((s, p) => s + p.market_value, 0);
+  const totalPL = positions.reduce((s, p) => s + p.unrealized_pl, 0);
+  const totalPct = positions.length
+    ? positions.reduce((s, p) => s + p.unrealized_plpc, 0) / positions.length
+    : 0;
+
+  document.getElementById('m-positions').textContent = count;
+  document.getElementById('m-mktval').textContent    = `$${mktVal.toFixed(2)} market value`;
+
+  const plEl  = document.getElementById('m-pnl');
+  const sign  = totalPL >= 0 ? '+' : '';
+  plEl.textContent  = `${sign}$${Math.abs(totalPL).toFixed(2)}`;
+  plEl.className    = 'metric-value ' + (totalPL >= 0 ? 'green' : 'red');
+  document.getElementById('m-pnlpct').textContent =
+    `${sign}${Math.abs(totalPct).toFixed(1)}% avg`;
+}
+
+// ── Tickers ───────────────────────────────────────────────────────────────────
+async function loadTickers() {
+  const r = await fetch('/api/tickers');
+  const d = await r.json();
+  tickers  = d.tickers || [];
+  mode     = d.mode    || 'manual';
+  scanTime = d.schedule || '15:50';
+  document.getElementById('scan-time').value    = scanTime;
+  document.getElementById('mode-select').value  = mode;
+  setMode(mode, false);
+  renderTickers();
+}
+
+function renderTickers() {
+  const el = document.getElementById('ticker-chips');
+  if (!tickers.length) {
+    el.innerHTML = '<span class="chip-empty">No tickers yet — add some above</span>';
+    return;
+  }
+  el.innerHTML = tickers.map(t =>
+    `<div class="chip">${t}<button class="chip-remove" onclick="removeTicker('${t}')" title="Remove">×</button></div>`
+  ).join('');
+  updateNextScanLabel();
+}
+
+function addTicker() {
+  const input = document.getElementById('ticker-input');
+  const val   = input.value.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (!val) return;
+  if (tickers.includes(val)) { showToast(`${val} already in list`, 'err'); return; }
+  tickers.push(val);
+  input.value = '';
+  renderTickers();
+  saveSettings();
+}
+
+function removeTicker(t) {
+  tickers = tickers.filter(x => x !== t);
+  renderTickers();
+  saveSettings();
+}
+
+function clearTickers() {
+  if (!tickers.length) return;
+  if (!confirm('Clear all tickers?')) return;
+  tickers = [];
+  renderTickers();
+  saveSettings();
+}
+
+async function saveSettings() {
+  scanTime = document.getElementById('scan-time').value;
+  mode     = document.getElementById('mode-select').value;
+  await fetch('/api/tickers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tickers, schedule: scanTime, mode }),
+  });
+  setMode(mode, false);
+  updateNextScanLabel();
+}
+
+function updateNextScanLabel() {
+  const el = document.getElementById('next-scan-label');
+  if (mode === 'automated' && scanTime) {
+    el.textContent = `Auto-scan at ${formatTime12(scanTime)} ET weekdays`;
+  } else {
+    el.textContent = tickers.length ? `${tickers.length} ticker${tickers.length > 1 ? 's' : ''} ready` : '';
+  }
+}
+
+function formatTime12(t) {
+  const [h, m] = t.split(':').map(Number);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${ampm}`;
+}
+
+// ── Mode ──────────────────────────────────────────────────────────────────────
+function setMode(m, save = true) {
+  mode = m;
+  document.getElementById('mode-manual-btn').classList.toggle('active', m === 'manual');
+  document.getElementById('mode-auto-btn').classList.toggle('active', m === 'automated');
+  document.getElementById('mode-info').textContent = m === 'manual'
+    ? 'Manual mode — scans only run when you click "Run scan now".'
+    : `Automated mode — scan runs at ${formatTime12(scanTime)} ET on weekdays.`;
+  if (save) saveSettings();
+}
+
+function toggleEdit() {
+  editMode = !editMode;
+  document.getElementById('edit-btn').classList.toggle('active', editMode);
+  document.getElementById('edit-btn').innerHTML = editMode
+    ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Editing`
+    : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit mode`;
+}
+
+// ── Scan ──────────────────────────────────────────────────────────────────────
+async function runScan() {
+  if (!tickers.length) { showToast('Add tickers first', 'err'); return; }
+  document.getElementById('scan-btn').disabled = true;
+  addLog('Manual scan triggered', 'info');
+  await fetch('/api/scan', { method: 'POST' });
+  showToast('Scan started — check log for updates', 'ok');
+  setTimeout(() => { document.getElementById('scan-btn').disabled = false; }, 3000);
+  setTimeout(loadLog, 2000);
+}
+
+// ── Stop orders ───────────────────────────────────────────────────────────────
+function openSetStop(symbol, qty, entry, current) {
+  modalCtx = { symbol, qty, existingId: null };
+  document.getElementById('modal-title').textContent = `Set stop — ${symbol}`;
+  const suggested = (current * 0.97).toFixed(2);
+  document.getElementById('modal-desc').textContent =
+    `Entry: $${entry.toFixed(2)}  ·  Current: $${current.toFixed(2)}  ·  Suggested: $${suggested} (3% below current)`;
+  document.getElementById('modal-stop-price').value = suggested;
+  document.getElementById('stop-modal').style.display = 'flex';
+}
+
+function openEditStop(symbol, qty, stopPrice, orderId) {
+  modalCtx = { symbol, qty, existingId: orderId };
+  document.getElementById('modal-title').textContent = `Edit stop — ${symbol}`;
+  document.getElementById('modal-desc').textContent  = `Current stop: $${parseFloat(stopPrice).toFixed(2)}`;
+  document.getElementById('modal-stop-price').value  = parseFloat(stopPrice).toFixed(2);
+  document.getElementById('stop-modal').style.display = 'flex';
+}
+
+function closeModal() {
+  document.getElementById('stop-modal').style.display = 'none';
+  modalCtx = null;
+}
+
+async function submitStop() {
+  const price = parseFloat(document.getElementById('modal-stop-price').value);
+  if (!price || price <= 0) { showToast('Enter a valid stop price', 'err'); return; }
+  if (!modalCtx) return;
+
+  if (modalCtx.existingId) {
+    await fetch(`/api/orders/${modalCtx.existingId}`, { method: 'DELETE' });
+  }
+
+  const r = await fetch('/api/orders/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: modalCtx.symbol, qty: modalCtx.qty, stop_price: price }),
+  });
+  const d = await r.json();
+  closeModal();
+  if (d.ok) {
+    showToast(`Stop placed for ${modalCtx?.symbol || ''}`, 'ok');
+    setTimeout(syncPositions, 1000);
+  } else {
+    showToast(d.error || 'Stop order failed', 'err');
+  }
+}
+
+async function placeMissingStops() {
+  const missing = positions.filter(p => !p.stop);
+  if (!missing.length) { showToast('All positions have stop orders', 'ok'); return; }
+  addLog(`Placing stops for ${missing.length} position(s)…`, 'info');
+  for (const p of missing) {
+    const stopPrice = (p.current_price * (1 - 0.03)).toFixed(2);
+    const r = await fetch('/api/orders/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: p.symbol, qty: p.qty, stop_price: stopPrice }),
+    });
+    const d = await r.json();
+    if (!d.ok) addLog(`${p.symbol}: stop failed — ${d.error}`, 'error');
+  }
+  setTimeout(syncPositions, 1000);
+}
+
+async function confirmCloseAll() {
+  if (!positions.length) { showToast('No open positions', 'err'); return; }
+  const syms = positions.map(p => p.symbol).join(', ');
+  if (!confirm(`Close ALL positions?\n\n${syms}\n\nThis places market sell orders immediately.`)) return;
+  addLog('Closing all positions…', 'warn');
+  for (const p of positions) {
+    const r = await fetch('/api/orders/sell', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: p.symbol, qty: p.qty }),
+    });
+    const d = await r.json();
+    if (!d.ok) addLog(`${p.symbol}: sell failed — ${d.error}`, 'error');
+  }
+  showToast('Market sell orders placed', 'ok');
+  setTimeout(syncPositions, 2000);
+}
+
+// ── Log ───────────────────────────────────────────────────────────────────────
+function addLog(msg, level = 'info') {
+  const now = new Date().toLocaleTimeString('en-US', { hour12: false, timeZone: 'America/New_York' }) + ' ET';
+  prependLogLine({ time: now, msg, level });
+}
+
+function prependLogLine(entry) {
+  const wrap = document.getElementById('log-wrap');
+  const div  = document.createElement('div');
+  div.className = 'log-line';
+  div.innerHTML = `<span class="log-ts">${entry.time}</span><span class="log-${entry.level}">${escHtml(entry.msg)}</span>`;
+  wrap.prepend(div);
+}
+
+async function loadLog() {
+  const r = await fetch('/api/log');
+  const logs = await r.json();
+  const wrap = document.getElementById('log-wrap');
+  wrap.innerHTML = '';
+  logs.slice(0, 80).forEach(e => prependLogLine(e));
+}
+
+function clearLog() {
+  document.getElementById('log-wrap').innerHTML = '';
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmt(n) { return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showToast(msg, type = 'ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className   = `toast ${type} show`;
+  setTimeout(() => { t.className = `toast ${type}`; }, 2800);
+}
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
