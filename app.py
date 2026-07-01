@@ -35,6 +35,7 @@ ET = pytz.timezone("America/New_York")
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
 ALPACA_API_KEY  = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET   = os.environ.get("ALPACA_SECRET", "")
+CRON_SECRET     = os.environ.get("CRON_SECRET", "")   # set this in Render env vars
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
@@ -411,13 +412,24 @@ def run_scan(source: str = None):
 # ── Scheduler setup ───────────────────────────────────────────────────────────
 
 def reschedule(time_str: str, mode: str):
+    """
+    Always schedules the Finviz scan at the given time on weekdays.
+    mode only controls whether the dashboard 'Run scan now' button uses
+    Finviz or the manual list — the scheduled job always uses Finviz.
+    """
     scheduler.remove_all_jobs()
-    if mode == "automated" and time_str:
+    if time_str:
         try:
             hour, minute = map(int, time_str.split(":"))
-            scheduler.add_job(run_scan, "cron", hour=hour, minute=minute,
-                              id="daily_scan", day_of_week="mon-fri")
-            log(f"Automated scan scheduled at {time_str} ET (weekdays)", "info")
+            scheduler.add_job(
+                run_scan, "cron",
+                args=("finviz",),
+                hour=hour, minute=minute,
+                id="daily_scan",
+                day_of_week="mon-fri",
+                timezone=ET,
+            )
+            log(f"Finviz scan scheduled at {time_str} ET every weekday", "info")
         except Exception as e:
             log(f"Schedule error: {e}", "error")
 
@@ -478,6 +490,22 @@ def trigger_scan():
     thread = threading.Thread(target=run_scan, args=(source,), daemon=True)
     thread.start()
     return jsonify({"ok": True, "msg": "Scan started"})
+
+
+@app.route("/api/cron/scan", methods=["POST", "GET"])
+def cron_scan():
+    """
+    External cron trigger endpoint — called by cron-job.org at 3:50 PM ET daily.
+    Protected by CRON_SECRET env var. Always runs Finviz scan.
+    """
+    secret = request.args.get("secret") or (request.get_json(silent=True) or {}).get("secret", "")
+    if CRON_SECRET and secret != CRON_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    now_et = datetime.now(ET).strftime("%Y-%m-%d %H:%M ET")
+    log(f"Cron trigger received at {now_et} — starting Finviz scan", "info")
+    thread = threading.Thread(target=run_scan, args=("finviz",), daemon=True)
+    thread.start()
+    return jsonify({"ok": True, "msg": f"Finviz scan started at {now_et}"})
 
 
 @app.route("/api/orders/stop", methods=["POST"])
