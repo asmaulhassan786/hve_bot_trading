@@ -523,7 +523,7 @@
         &nbsp;&nbsp;Mode:
         <select id="mode-select" onchange="saveSettings()">
           <option value="manual">Manual — I trigger scans</option>
-          <option value="automated">Automated — run at scheduled time</option>
+          <option value="automated" selected>Automated — run at scheduled time</option>
         </select>
         &nbsp;&nbsp;Position size ($):
         <input type="number" id="buy-amount" value="500" min="1" step="1" onchange="saveSettings()" />
@@ -585,11 +585,11 @@
         <span class="card-title">Trading controls</span>
       </div>
       <div class="mode-toggle">
-        <button class="mode-btn active" id="mode-manual-btn" onclick="setMode('manual')">Manual</button>
-        <button class="mode-btn"        id="mode-auto-btn"   onclick="setMode('automated')">Automated</button>
+        <button class="mode-btn"        id="mode-manual-btn" onclick="setMode('manual')">Manual</button>
+        <button class="mode-btn active" id="mode-auto-btn"   onclick="setMode('automated')">Automated</button>
       </div>
       <div class="mode-info" id="mode-info">
-        Manual mode — scans only run when you click "Run scan now".
+        Automated mode — scans run automatically at the scheduled time.
       </div>
       <div class="action-btns">
         <button class="action-btn primary" onclick="runScan()" id="scan-btn">
@@ -645,7 +645,7 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 let positions = [];
 let tickers   = [];
-let mode      = 'manual';
+let mode      = 'automated';
 let scanTime  = '15:50';
 let buyAmount = 500;
 let editMode  = false;
@@ -773,7 +773,7 @@ async function loadTickers() {
   const r = await fetch('/api/tickers');
   const d = await r.json();
   tickers   = d.tickers    || [];
-  mode      = d.mode       || 'manual';
+  mode      = d.mode       || 'automated';
   scanTime  = d.schedule   || '15:50';
   buyAmount = d.buy_amount || 500;
   document.getElementById('scan-time').value    = scanTime;

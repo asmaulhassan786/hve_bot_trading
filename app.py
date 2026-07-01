@@ -110,7 +110,7 @@ def load_tickers() -> dict:
         with open(TICKERS_FILE) as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"tickers": [], "schedule": "15:50", "mode": "manual", "buy_amount": DEFAULT_BUY_AMOUNT}
+        return {"tickers": [], "schedule": "15:50", "mode": "automated", "buy_amount": DEFAULT_BUY_AMOUNT}
 
 
 def save_tickers(data: dict):
@@ -570,7 +570,7 @@ def get_tickers():
 def save_tickers_route():
     data = request.get_json()
     save_tickers(data)
-    mode = data.get("mode", "manual")
+    mode = data.get("mode", "automated")
     schedule = data.get("schedule", "15:50")
     reschedule(schedule, mode)
     return jsonify({"ok": True})
@@ -655,7 +655,7 @@ def get_log():
 
 def boot():
     data = load_tickers()
-    reschedule(data.get("schedule", "15:50"), data.get("mode", "manual"))
+    reschedule(data.get("schedule", "15:50"), data.get("mode", "automated"))
     if not scheduler.running:
         scheduler.start()
     log("HVE Action started", "info")
