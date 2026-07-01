@@ -23,8 +23,25 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request
 
 try:
+    import finvizfinance.util as _finviz_util
     from finvizfinance.screener.overview import Overview as FinvizOverview
     FINVIZ_AVAILABLE = True
+
+    # finvizfinance ships a hardcoded, years-out-of-date Chrome UA and no other
+    # browser headers, which Finviz's bot-protection flags as non-browser
+    # traffic (especially from cloud/datacenter IPs like Render's). Give it a
+    # full, current browser fingerprint instead.
+    _finviz_util.headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finviz.com/",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
 except ImportError:
     FINVIZ_AVAILABLE = False
 
@@ -278,25 +295,42 @@ def fetch_finviz_tickers():
     if not FINVIZ_AVAILABLE:
         log("finvizfinance not installed — cannot use Finviz source", "error")
         return []
-    try:
-        today = datetime.now(ET).strftime("%Y-%m-%d")
-        log(f"Fetching tickers from Finviz for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
-        fov = FinvizOverview()
-        fov.set_filter(filters_dict={
-            "Market Cap.": "+Small (over $300mln)",
-            "Price":       "Over $3",
-            "Change":      "Up 10%",
-        })
-        df = fov.screener_view(order="Change", verbose=0)
-        if df is None or df.empty:
-            log("Finviz returned no tickers matching criteria today", "warn")
-            return []
-        tickers = df["Ticker"].tolist()
-        log(f"Finviz returned {len(tickers)} ticker(s) for {today}: {', '.join(tickers[:20])}{'…' if len(tickers) > 20 else ''}", "info")
-        return tickers
-    except Exception as e:
-        log(f"Finviz fetch failed: {e}", "error")
-        return []
+
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    log(f"Fetching tickers from Finviz for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
+
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt == 1:
+                # Warm up the session with a plain page hit first — some
+                # Cloudflare rules require a valid prior page visit/cookie
+                # before allowing the screener endpoint.
+                _finviz_util.session.get(
+                    "https://finviz.com/", headers=_finviz_util.headers,
+                    timeout=_finviz_util.timeout_value,
+                )
+            fov = FinvizOverview()
+            fov.set_filter(filters_dict={
+                "Market Cap.": "+Small (over $300mln)",
+                "Price":       "Over $3",
+                "Change":      "Up 10%",
+            })
+            df = fov.screener_view(order="Change", verbose=0)
+            if df is None or df.empty:
+                log("Finviz returned no tickers matching criteria today", "warn")
+                return []
+            tickers = df["Ticker"].tolist()
+            log(f"Finviz returned {len(tickers)} ticker(s) for {today}: {', '.join(tickers[:20])}{'…' if len(tickers) > 20 else ''}", "info")
+            return tickers
+        except Exception as e:
+            if attempt < attempts:
+                wait = 2 ** attempt
+                log(f"Finviz fetch failed (attempt {attempt}/{attempts}): {e} — retrying in {wait}s", "warn")
+                time.sleep(wait)
+            else:
+                log(f"Finviz fetch failed: {e}", "error")
+    return []
 
 
 def run_scan(source: str = None):
