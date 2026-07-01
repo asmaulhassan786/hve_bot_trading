@@ -63,6 +63,11 @@ if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
     # so verifying against the real finviz.com cert always fails here.
     # This only affects the dedicated finvizfinance session, not Alpaca/yfinance.
     _finviz_util.session.verify = False
+    # requests silently overrides session.verify with the REQUESTS_CA_BUNDLE
+    # env var (set above for Alpaca/yfinance) unless verify is passed
+    # per-call or trust_env is off — finvizfinance never passes verify
+    # explicitly, so trust_env must be disabled here for verify=False to stick.
+    _finviz_util.session.trust_env = False
     requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
