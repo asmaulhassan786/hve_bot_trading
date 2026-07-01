@@ -964,15 +964,16 @@ async function confirmCloseAll() {
 // ── Log ───────────────────────────────────────────────────────────────────────
 function addLog(msg, level = 'info') {
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, timeZone: 'America/New_York' }) + ' ET';
-  prependLogLine({ time: now, msg, level });
+  appendLogLine({ time: now, msg, level });
 }
 
-function prependLogLine(entry) {
+function appendLogLine(entry) {
   const wrap = document.getElementById('log-wrap');
   const div  = document.createElement('div');
   div.className = 'log-line';
   div.innerHTML = `<span class="log-ts">${entry.time}</span><span class="log-${entry.level}">${escHtml(entry.msg)}</span>`;
-  wrap.prepend(div);
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
 }
 
 async function loadLog() {
@@ -980,7 +981,9 @@ async function loadLog() {
   const logs = await r.json();
   const wrap = document.getElementById('log-wrap');
   wrap.innerHTML = '';
-  logs.slice(0, 80).forEach(e => prependLogLine(e));
+  // server returns newest-first; reverse so oldest is at top, newest at bottom
+  logs.slice(0, 80).reverse().forEach(e => appendLogLine(e));
+  wrap.scrollTop = wrap.scrollHeight;
 }
 
 function clearLog() {
