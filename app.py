@@ -282,10 +282,12 @@ def fetch_fmp_quotes(symbols: list) -> dict:
         return {}
     try:
         r = requests.get(
-            f"https://financialmodelingprep.com/api/v3/quote/{','.join(symbols)}",
-            params={"apikey": FMP_API_KEY}, timeout=10,
+            "https://financialmodelingprep.com/stable/batch-quote",
+            params={"symbols": ",".join(symbols), "apikey": FMP_API_KEY}, timeout=10,
         )
-        r.raise_for_status()
+        if not r.ok:
+            log(f"FMP quote lookup failed: {r.status_code} {r.text[:300]}", "error")
+            return {}
         quotes = r.json()
         if not isinstance(quotes, list):
             log(f"FMP quote returned unexpected response: {quotes}", "error")
