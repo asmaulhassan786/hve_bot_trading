@@ -291,6 +291,13 @@ def fetch_alpaca_movers():
         log(f"Alpaca movers fetch failed: {e}", "error")
         return []
 
+    log(
+        f"Alpaca returned {len(gainers)} raw gainer(s): "
+        + ", ".join(f"{g.get('symbol')}(${g.get('price')}, {g.get('percent_change')}%)" for g in gainers[:20])
+        + ("…" if len(gainers) > 20 else ""),
+        "info",
+    )
+
     candidates = [
         g["symbol"] for g in gainers
         if g.get("symbol") and g.get("price", 0) > 3 and g.get("percent_change", 0) > 10
@@ -298,6 +305,7 @@ def fetch_alpaca_movers():
     if not candidates:
         log("Alpaca movers returned no candidates matching price/change criteria", "warn")
         return []
+    log(f"{len(candidates)} candidate(s) passed price/change filter: {', '.join(candidates)}", "info")
 
     tickers = []
     cap_lookup_failed = []
@@ -308,6 +316,7 @@ def fetch_alpaca_movers():
             log(f"  {sym}: market cap lookup failed ({e}) — excluded", "warn")
             cap_lookup_failed.append(sym)
             continue
+        log(f"  {sym}: market cap = {cap}", "info")
         if cap and cap > 300_000_000:
             tickers.append(sym)
 
