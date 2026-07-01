@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>HVE Action</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any" />
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='apple-touch-icon.png') }}" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -58,6 +60,7 @@
     letter-spacing: -0.01em;
   }
   .logo svg { width: 20px; height: 20px; }
+  .logo img { height: 28px; width: auto; display: block; }
   .conn-status {
     display: flex;
     align-items: center;
@@ -456,9 +459,7 @@
 <!-- Top bar -->
 <div class="topbar">
   <div class="logo">
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
-      <polygon points="10,2 13,8 19,9 14.5,13.5 15.5,19.5 10,17 4.5,19.5 5.5,13.5 1,9 7,8" />
-    </svg>
+    <img src="{{ url_for('static', filename='logo-mark.png') }}" alt="HVE" />
     HVE Action
   </div>
   <div class="conn-status">
