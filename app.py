@@ -5,6 +5,7 @@ positions, stop orders, and the daily ticker scan list.
 """
 
 import json
+import math
 import os
 import time
 import threading
@@ -39,8 +40,8 @@ LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-BUY_AMOUNT    = 500
-STOP_LOSS_PCT = 0.03
+DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
+STOP_LOSS_PCT      = 0.03
 
 activity_log = deque(maxlen=200)
 _log_lock = threading.Lock()
@@ -109,7 +110,7 @@ def load_tickers() -> dict:
         with open(TICKERS_FILE) as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"tickers": [], "schedule": "15:50", "mode": "manual"}
+        return {"tickers": [], "schedule": "15:50", "mode": "manual", "buy_amount": DEFAULT_BUY_AMOUNT}
 
 
 def save_tickers(data: dict):
@@ -226,10 +227,10 @@ def place_stop_order_internal(ticker, qty, stop_price):
     return alpaca_post("/orders", payload)
 
 
-def place_buy_order(ticker, notional):
+def place_buy_order(ticker, qty):
     payload = {
         "symbol":        ticker,
-        "notional":      str(round(notional, 2)),
+        "qty":           str(int(qty)),
         "side":          "buy",
         "type":          "market",
         "time_in_force": "day",
@@ -458,7 +459,8 @@ def run_scan(source: str = None):
         return
 
     # ── Place buy orders ──────────────────────────────────────────────────────
-    log(f"Placing ${BUY_AMOUNT} buy orders for qualified stocks…", "info")
+    buy_amount = data.get("buy_amount", DEFAULT_BUY_AMOUNT)
+    log(f"Placing ~${buy_amount} buy orders (whole shares, rounded up) for qualified stocks…", "info")
     existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
 
     for s in qualified:
@@ -467,7 +469,12 @@ def run_scan(source: str = None):
             log(f"  {tkr}: already in positions — skipping buy", "info")
             continue
 
-        buy      = place_buy_order(tkr, BUY_AMOUNT)
+        if s["price"] <= 0:
+            log(f"  {tkr}: invalid price {s['price']} — skipping buy", "error")
+            continue
+        qty = math.ceil(buy_amount / s["price"])
+
+        buy      = place_buy_order(tkr, qty)
         order_id = buy.get("id")
         if not order_id:
             log(f"  {tkr}: buy order failed — {buy.get('message', 'unknown error')}", "error")
@@ -484,7 +491,7 @@ def run_scan(source: str = None):
         qty         = float(filled["filled_qty"])
         stop_price  = round(entry_price * (1 - STOP_LOSS_PCT), 2)
 
-        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={qty:.4f}", "ok")
+        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={int(qty)}", "ok")
 
         stop = place_stop_order_internal(tkr, qty, stop_price)
         if stop.get("id"):
