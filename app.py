@@ -31,6 +31,7 @@ ALPACA_DATA_URL = os.environ.get("ALPACA_DATA_URL", "https://data.alpaca.markets
 ALPACA_API_KEY  = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET   = os.environ.get("ALPACA_SECRET", "")
 CRON_SECRET     = os.environ.get("CRON_SECRET", "")   # set this in Render env vars
+FMP_API_KEY     = os.environ.get("FMP_API_KEY", "")    # financialmodelingprep.com key — market cap lookups
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
@@ -268,13 +269,40 @@ def is_trading_day() -> bool:
         return True  # fail open so scan isn't silently skipped
 
 
+def fetch_market_caps(symbols: list) -> dict:
+    """
+    Batch market-cap lookup via Financial Modeling Prep's quote endpoint.
+    Returns {symbol: market_cap or None}. One request for all symbols.
+    (yfinance's market-cap lookup depends on Yahoo's cookie/crumb handshake,
+    which silently returns None for every symbol when run from Render —
+    same class of problem as the original Finviz block, just from Yahoo.)
+    """
+    if not FMP_API_KEY:
+        log("FMP_API_KEY not set — cannot look up market cap", "error")
+        return {}
+    try:
+        r = requests.get(
+            f"https://financialmodelingprep.com/api/v3/quote/{','.join(symbols)}",
+            params={"apikey": FMP_API_KEY}, timeout=10,
+        )
+        r.raise_for_status()
+        quotes = r.json()
+        if not isinstance(quotes, list):
+            log(f"FMP quote returned unexpected response: {quotes}", "error")
+            return {}
+        return {q["symbol"]: q.get("marketCap") for q in quotes if q.get("symbol")}
+    except Exception as e:
+        log(f"FMP market cap lookup failed: {e}", "error")
+        return {}
+
+
 def fetch_alpaca_movers():
     """
     Pull today's top gainers from Alpaca's own Market Data API (no scraping,
     same keys already used for trading) and apply the same coarse filter
     Finviz used to: market cap >$300M, price >$3, change >10%.
     Alpaca's movers endpoint doesn't support a market-cap filter, so that
-    part is applied afterward via yfinance, scoped to the (small) candidate
+    part is applied afterward via FMP, scoped to the (small) candidate
     list that already passed the price/change filters.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
@@ -307,17 +335,17 @@ def fetch_alpaca_movers():
         return []
     log(f"{len(candidates)} candidate(s) passed price/change filter: {', '.join(candidates)}", "info")
 
+    caps = fetch_market_caps(candidates)
     tickers = []
     cap_lookup_failed = []
     for sym in candidates:
-        try:
-            cap = yf.Ticker(sym).fast_info.get("market_cap")
-        except Exception as e:
-            log(f"  {sym}: market cap lookup failed ({e}) — excluded", "warn")
+        cap = caps.get(sym)
+        if cap is None:
+            log(f"  {sym}: market cap lookup failed — excluded", "warn")
             cap_lookup_failed.append(sym)
             continue
         log(f"  {sym}: market cap = {cap}", "info")
-        if cap and cap > 300_000_000:
+        if cap > 300_000_000:
             tickers.append(sym)
 
     if cap_lookup_failed:

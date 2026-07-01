@@ -11,6 +11,8 @@ services:
         sync: false
       - key: ALPACA_SECRET
         sync: false
+      - key: FMP_API_KEY
+        sync: false
     disk:
       name: hve-data
       mountPath: /opt/render/project/src/data
