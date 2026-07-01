@@ -271,8 +271,13 @@ def is_trading_day() -> bool:
 
 def fetch_fmp_quotes(symbols: list) -> dict:
     """
-    Batch quote lookup via Financial Modeling Prep. Returns
-    {symbol: {"market_cap": ..., "name": ...}}. One request for all symbols.
+    Company profile lookup via Financial Modeling Prep. Returns
+    {symbol: {"market_cap": ..., "name": ...}}.
+    FMP's real-time "quote" endpoints are paid-plan-only (confirmed via 402
+    Restricted Endpoint with a real key); "profile" is fundamentals data
+    (updated periodically, not real-time — fine for a >$300M cap check) and
+    has historically been free-tier accessible. One request per symbol since
+    the bulk-profile endpoint's symbol-list semantics aren't confirmed.
     (yfinance's market-cap lookup depends on Yahoo's cookie/crumb handshake,
     which silently returns None for every symbol when run from Render —
     same class of problem as the original Finviz block, just from Yahoo.)
@@ -280,25 +285,28 @@ def fetch_fmp_quotes(symbols: list) -> dict:
     if not FMP_API_KEY:
         log("FMP_API_KEY not set — cannot look up market cap", "error")
         return {}
-    try:
-        r = requests.get(
-            "https://financialmodelingprep.com/stable/batch-quote",
-            params={"symbols": ",".join(symbols), "apikey": FMP_API_KEY}, timeout=10,
-        )
-        if not r.ok:
-            log(f"FMP quote lookup failed: {r.status_code} {r.text[:300]}", "error")
-            return {}
-        quotes = r.json()
-        if not isinstance(quotes, list):
-            log(f"FMP quote returned unexpected response: {quotes}", "error")
-            return {}
-        return {
-            q["symbol"]: {"market_cap": q.get("marketCap"), "name": q.get("name", "")}
-            for q in quotes if q.get("symbol")
-        }
-    except Exception as e:
-        log(f"FMP quote lookup failed: {e}", "error")
-        return {}
+    results = {}
+    for sym in symbols:
+        try:
+            r = requests.get(
+                "https://financialmodelingprep.com/stable/profile",
+                params={"symbol": sym, "apikey": FMP_API_KEY}, timeout=10,
+            )
+            if not r.ok:
+                log(f"FMP profile lookup failed for {sym}: {r.status_code} {r.text[:200]}", "error")
+                continue
+            data = r.json()
+            if isinstance(data, list):
+                data = data[0] if data else None
+            if not data:
+                continue
+            results[sym] = {
+                "market_cap": data.get("marketCap") or data.get("mktCap"),
+                "name": data.get("companyName") or data.get("name", ""),
+            }
+        except Exception as e:
+            log(f"FMP profile lookup failed for {sym}: {e}", "error")
+    return results
 
 
 def fetch_alpaca_movers():
