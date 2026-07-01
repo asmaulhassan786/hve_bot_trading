@@ -269,10 +269,10 @@ def is_trading_day() -> bool:
         return True  # fail open so scan isn't silently skipped
 
 
-def fetch_market_caps(symbols: list) -> dict:
+def fetch_fmp_quotes(symbols: list) -> dict:
     """
-    Batch market-cap lookup via Financial Modeling Prep's quote endpoint.
-    Returns {symbol: market_cap or None}. One request for all symbols.
+    Batch quote lookup via Financial Modeling Prep. Returns
+    {symbol: {"market_cap": ..., "name": ...}}. One request for all symbols.
     (yfinance's market-cap lookup depends on Yahoo's cookie/crumb handshake,
     which silently returns None for every symbol when run from Render —
     same class of problem as the original Finviz block, just from Yahoo.)
@@ -290,9 +290,12 @@ def fetch_market_caps(symbols: list) -> dict:
         if not isinstance(quotes, list):
             log(f"FMP quote returned unexpected response: {quotes}", "error")
             return {}
-        return {q["symbol"]: q.get("marketCap") for q in quotes if q.get("symbol")}
+        return {
+            q["symbol"]: {"market_cap": q.get("marketCap"), "name": q.get("name", "")}
+            for q in quotes if q.get("symbol")
+        }
     except Exception as e:
-        log(f"FMP market cap lookup failed: {e}", "error")
+        log(f"FMP quote lookup failed: {e}", "error")
         return {}
 
 
@@ -335,17 +338,30 @@ def fetch_alpaca_movers():
         return []
     log(f"{len(candidates)} candidate(s) passed price/change filter: {', '.join(candidates)}", "info")
 
-    caps = fetch_market_caps(candidates)
+    # Warrants trade nothing like the underlying common stock and shouldn't
+    # be fed into this strategy. ".WS"/".WT" suffixes are an unambiguous
+    # warrant/rights ticker convention; the FMP company name is the
+    # authoritative check for the no-separator style (e.g. "RAAQW").
+    non_warrants = [s for s in candidates if not s.split(".")[-1] in ("WS", "WT")]
+    dropped_suffix = [s for s in candidates if s not in non_warrants]
+    if dropped_suffix:
+        log(f"Dropped warrant/rights ticker(s) by suffix: {', '.join(dropped_suffix)}", "info")
+
+    quotes = fetch_fmp_quotes(non_warrants)
     tickers = []
     cap_lookup_failed = []
-    for sym in candidates:
-        cap = caps.get(sym)
-        if cap is None:
+    for sym in non_warrants:
+        q = quotes.get(sym)
+        if q is None:
             log(f"  {sym}: market cap lookup failed — excluded", "warn")
             cap_lookup_failed.append(sym)
             continue
+        if "warrant" in q["name"].lower():
+            log(f"  {sym}: '{q['name']}' — warrant, excluded", "info")
+            continue
+        cap = q["market_cap"]
         log(f"  {sym}: market cap = {cap}", "info")
-        if cap > 300_000_000:
+        if cap and cap > 300_000_000:
             tickers.append(sym)
 
     if cap_lookup_failed:
