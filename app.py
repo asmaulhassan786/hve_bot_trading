@@ -53,6 +53,11 @@ ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.ma
 ALPACA_API_KEY  = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET   = os.environ.get("ALPACA_SECRET", "")
 CRON_SECRET     = os.environ.get("CRON_SECRET", "")   # set this in Render env vars
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")  # scraperapi.com key — routes Finviz requests around Render's blocked IP
+
+if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
+    _proxy_url = f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
+    _finviz_util.set_proxy({"http": _proxy_url, "https": _proxy_url})
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
@@ -308,7 +313,7 @@ def fetch_finviz_tickers():
                 # before allowing the screener endpoint.
                 _finviz_util.session.get(
                     "https://finviz.com/", headers=_finviz_util.headers,
-                    timeout=_finviz_util.timeout_value,
+                    timeout=_finviz_util.timeout_value, proxies=_finviz_util.proxy_dict,
                 )
             fov = FinvizOverview()
             fov.set_filter(filters_dict={
@@ -599,6 +604,10 @@ def boot():
     reschedule(data.get("schedule", "15:50"), data.get("mode", "manual"))
     if not scheduler.running:
         scheduler.start()
+    if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
+        log("Finviz requests will route through ScraperAPI proxy", "info")
+    elif FINVIZ_AVAILABLE:
+        log("SCRAPER_API_KEY not set — Finviz requests go direct (may be blocked on Render)", "warn")
     log("HVE Action started", "info")
 
 
