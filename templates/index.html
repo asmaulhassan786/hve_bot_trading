@@ -862,13 +862,20 @@ function toggleEdit() {
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
 async function runScan() {
-  if (!tickers.length) { showToast('Add tickers first', 'err'); return; }
+  const isAuto = mode === 'automated';
+  if (!isAuto && !tickers.length) { showToast('Add tickers to your scan list first', 'err'); return; }
   document.getElementById('scan-btn').disabled = true;
-  addLog('Manual scan triggered', 'info');
-  await fetch('/api/scan', { method: 'POST' });
-  showToast('Scan started — check log for updates', 'ok');
+  const source = isAuto ? 'finviz' : 'manual';
+  addLog(`Scan triggered (${source})`, 'info');
+  await fetch('/api/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  });
+  showToast('Scan started — watch the log', 'ok');
   setTimeout(() => { document.getElementById('scan-btn').disabled = false; }, 3000);
   setTimeout(loadLog, 2000);
+  setInterval(loadLog, 5000);
 }
 
 // ── Stop orders ───────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 """
-Finviz Unusual Volume Screener — runs at 3:50 PM ET
-Filters stocks with ALL three conditions:
-  1. Change > 10%
+HVE Screener — runs at 3:50 PM ET
+Tickers are loaded from tickers.txt (one per line), updated manually each day
+from your tracked website. Filters stocks with ALL three conditions:
+  1. Ticker is in tickers.txt (manually curated daily)
   2. Current price >= 70% of today's high-low range above the low
   3. Today's volume is the highest in the past 2 years
 
@@ -13,10 +14,11 @@ import json
 import time
 import requests
 import yfinance as yf
-from finvizfinance.screener.overview import Overview
 from datetime import datetime
 import pytz
 from config import ALPACA_BASE_URL, ALPACA_API_KEY, ALPACA_SECRET
+
+TICKERS_FILE = "tickers.txt"
 
 ET = pytz.timezone("America/New_York")
 
@@ -29,19 +31,23 @@ STOP_LOSS_PCT   = 0.03  # 3% initial stop loss
 POSITIONS_FILE  = "positions.json"
 
 
-# ── Finviz helpers ────────────────────────────────────────────────────────────
+# ── Ticker list helpers ───────────────────────────────────────────────────────
 
-def fetch_finviz_tickers() -> list:
-    foverview = Overview()
-    foverview.set_filter(filters_dict={
-        "Market Cap.": "+Small (over $300mln)",
-        "Price": "Over $3",
-        "Change": "Up 10%",
-    })
-    df = foverview.screener_view(order="Change", verbose=0)
-    if df is None or df.empty:
+def fetch_tickers() -> list:
+    """Read tickers from tickers.txt — one ticker per line, # lines are comments."""
+    try:
+        with open(TICKERS_FILE) as f:
+            tickers = [
+                line.strip().upper()
+                for line in f
+                if line.strip() and not line.strip().startswith("#")
+            ]
+        if not tickers:
+            print(f"No tickers found in {TICKERS_FILE}.")
+        return tickers
+    except FileNotFoundError:
+        print(f"{TICKERS_FILE} not found. Create it with one ticker per line.")
         return []
-    return df["Ticker"].tolist()
 
 
 def get_quote_and_volume(ticker: str):
@@ -142,10 +148,9 @@ def screen():
     print(f"\nFinviz Unusual Volume Screener  —  {now_et.strftime('%Y-%m-%d %H:%M ET')}")
     print("=" * 78)
 
-    print("Fetching Finviz screener tickers (change >10%, unusual volume)...")
-    tickers = fetch_finviz_tickers()
+    print(f"Loading tickers from {TICKERS_FILE}...")
+    tickers = fetch_tickers()
     if not tickers:
-        print("No tickers returned from Finviz screener.")
         return
 
     print(f"Found {len(tickers)} tickers. Checking intraday + 2-year volume history...\n")
@@ -157,7 +162,7 @@ def screen():
             continue
         pct_change = (q["price"] - q["open"]) / q["open"] * 100
         pos        = position_in_range(q["price"], q["low"], q["high"])
-        if pct_change >= 10.0 and pos >= 0.70 and q["today_vol"] >= q["max_2y_vol"]:
+        if pos >= 0.70 and q["today_vol"] >= q["max_2y_vol"]:
             qualified.append({**q, "change_pct": pct_change, "range_pos": pos * 100})
 
     if not qualified:

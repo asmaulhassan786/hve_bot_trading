@@ -9,13 +9,24 @@ import os
 import time
 import threading
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import certifi
+os.environ["SSL_CERT_FILE"]      = certifi.where()
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+os.environ["CURL_CA_BUNDLE"]     = certifi.where()
 
 import pytz
 import requests
 import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request
+
+try:
+    from finvizfinance.screener.overview import Overview as FinvizOverview
+    FINVIZ_AVAILABLE = True
+except ImportError:
+    FINVIZ_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -166,23 +177,36 @@ def fetch_positions_with_stops():
 # ── Scan logic ────────────────────────────────────────────────────────────────
 
 def get_quote_and_volume(ticker: str):
+    """
+    Fetch intraday range + 2-year max volume using yfinance (full SIP market volume).
+    SSL env vars are set at module load so this works on both Linux (Render) and Windows.
+    Returns None if data is unavailable or insufficient.
+    """
     try:
-        t = yf.Ticker(ticker)
+        t        = yf.Ticker(ticker)
         intraday = t.history(period="1d", interval="1m")
         if intraday.empty:
             return None
+
         day_low   = float(intraday["Low"].min())
         day_high  = float(intraday["High"].max())
         price     = float(intraday["Close"].iloc[-1])
         today_vol = int(intraday["Volume"].sum())
-        daily     = t.history(period="2y", interval="1d")
+
+        daily = t.history(period="2y", interval="1d")
         if len(daily) < 2:
             return None
+
+        # Exclude today so we compare against historical max only
         max_2y_vol = int(daily["Volume"].iloc[:-1].max())
+
         return {
-            "ticker": ticker, "price": price,
-            "low": day_low, "high": day_high,
-            "today_vol": today_vol, "max_2y_vol": max_2y_vol,
+            "ticker":    ticker,
+            "price":     round(price, 2),
+            "low":       round(day_low, 2),
+            "high":      round(day_high, 2),
+            "today_vol": today_vol,
+            "max_2y_vol": max_2y_vol,
         }
     except Exception:
         return None
@@ -229,69 +253,159 @@ def wait_for_fill(order_id, timeout_sec=120):
     return None
 
 
-def run_scan():
-    log("Scan started", "info")
+def is_trading_day() -> bool:
+    """Check Alpaca's market calendar to confirm today is a trading day."""
+    try:
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/calendar",
+            params={"start": today, "end": today},
+            headers=alpaca_headers(),
+            timeout=10,
+        )
+        calendar = r.json()
+        if isinstance(calendar, list) and len(calendar) > 0:
+            return calendar[0].get("date") == today
+        return False
+    except Exception as e:
+        log(f"Calendar check failed: {e} — assuming trading day", "warn")
+        return True  # fail open so scan isn't silently skipped
+
+
+def fetch_finviz_tickers():
+    """Pull tickers from Finviz using today's intraday data: market cap >$300M, price >$3, change >10%."""
+    if not FINVIZ_AVAILABLE:
+        log("finvizfinance not installed — cannot use Finviz source", "error")
+        return []
+    try:
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        log(f"Fetching tickers from Finviz for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
+        fov = FinvizOverview()
+        fov.set_filter(filters_dict={
+            "Market Cap.": "+Small (over $300mln)",
+            "Price":       "Over $3",
+            "Change":      "Up 10%",
+        })
+        df = fov.screener_view(order="Change", verbose=0)
+        if df is None or df.empty:
+            log("Finviz returned no tickers matching criteria today", "warn")
+            return []
+        tickers = df["Ticker"].tolist()
+        log(f"Finviz returned {len(tickers)} ticker(s) for {today}: {', '.join(tickers[:20])}{'…' if len(tickers) > 20 else ''}", "info")
+        return tickers
+    except Exception as e:
+        log(f"Finviz fetch failed: {e}", "error")
+        return []
+
+
+def run_scan(source: str = None):
+    """
+    source='finviz' — pull from Finviz screener (used in automated mode)
+    source='manual' — use the user's ticker list (used in manual mode)
+    source=None     — auto-detect based on saved mode setting
+    """
     data = load_tickers()
-    tickers = data.get("tickers", [])
-    if not tickers:
-        log("No tickers in scan list — scan aborted", "warn")
+    if source is None:
+        source = "finviz" if data.get("mode") == "automated" else "manual"
+
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    log(f"── Scan started for {today} (source: {source}) ──", "info")
+
+    if not is_trading_day():
+        log(f"{today} is not a trading day (holiday or weekend) — scan skipped", "warn")
         return
 
-    log(f"Scanning {len(tickers)} ticker(s): {', '.join(tickers)}", "info")
-    qualified = []
+    # ── Get ticker list ───────────────────────────────────────────────────────
+    if source == "finviz":
+        tickers = fetch_finviz_tickers()
+        if not tickers:
+            log("Scan aborted — no tickers from Finviz", "warn")
+            return
+    else:
+        tickers = data.get("tickers", [])
+        if not tickers:
+            log("Scan aborted — manual ticker list is empty", "warn")
+            return
+        log(f"Manual list: {', '.join(tickers)}", "info")
+
+    # ── Apply HVE criteria to every ticker ───────────────────────────────────
+    log(f"Applying HVE criteria to all {len(tickers)} ticker(s)…", "info")
+    log("HVE criteria: (1) price ≥70% of day high-low range  (2) today's SIP vol ≥ 2-year daily high", "info")
+
+    qualified  = []
+    eliminated = []
+    no_data    = []
 
     for tkr in tickers:
+        time.sleep(0.3)  # avoid rate-limiting yfinance
         q = get_quote_and_volume(tkr)
+
         if q is None:
-            log(f"{tkr}: data unavailable — skipped", "warn")
+            no_data.append(tkr)
+            log(f"  {tkr}: — data unavailable, skipped", "warn")
             continue
-        pos = position_in_range(q["price"], q["low"], q["high"])
-        if pos >= 0.70 and q["today_vol"] >= q["max_2y_vol"]:
-            qualified.append({**q, "range_pos": round(pos * 100, 1)})
-            log(f"{tkr}: passed — range {round(pos*100,1)}%, vol {q['today_vol']:,}", "ok")
+
+        pos     = position_in_range(q["price"], q["low"], q["high"])
+        pos_pct = round(pos * 100, 1)
+        rng_ok  = pos >= 0.70
+        vol_ok  = q["today_vol"] >= q["max_2y_vol"]
+        vol_ratio = round(q["today_vol"] / q["max_2y_vol"], 2) if q["max_2y_vol"] else 0
+
+        criteria_1 = f"range {pos_pct}% {'✓' if rng_ok else '✗ (<70%)'}"
+        criteria_2 = f"vol {q['today_vol']:,} vs 2Y high {q['max_2y_vol']:,} (ratio {vol_ratio}x) {'✓' if vol_ok else '✗'}"
+
+        if rng_ok and vol_ok:
+            qualified.append({**q, "range_pos": pos_pct})
+            log(f"  {tkr}: QUALIFIED — {criteria_1}  |  {criteria_2}", "ok")
         else:
-            log(f"{tkr}: did not qualify — range {round(pos*100,1)}%, vol {q['today_vol']:,}", "info")
+            eliminated.append(tkr)
+            log(f"  {tkr}: eliminated — {criteria_1}  |  {criteria_2}", "info")
+
+    log(
+        f"── HVE result: {len(qualified)} qualified  {len(eliminated)} eliminated  {len(no_data)} no data ──",
+        "ok" if qualified else "warn",
+    )
 
     if not qualified:
-        log("No stocks qualified today", "warn")
+        log("No stocks met all HVE criteria — no orders placed", "warn")
         return
 
-    log(f"{len(qualified)} stock(s) qualified — placing buy orders", "ok")
-
+    # ── Place buy orders ──────────────────────────────────────────────────────
+    log(f"Placing ${BUY_AMOUNT} buy orders for qualified stocks…", "info")
     existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
 
     for s in qualified:
         tkr = s["ticker"]
         if tkr in existing_positions:
-            log(f"{tkr}: already in positions — skipping buy", "info")
+            log(f"  {tkr}: already in positions — skipping buy", "info")
             continue
 
-        buy = place_buy_order(tkr, BUY_AMOUNT)
+        buy      = place_buy_order(tkr, BUY_AMOUNT)
         order_id = buy.get("id")
         if not order_id:
-            log(f"{tkr}: buy order failed — {buy.get('message', 'unknown error')}", "error")
+            log(f"  {tkr}: buy order failed — {buy.get('message', 'unknown error')}", "error")
             continue
 
-        log(f"{tkr}: buy order placed, waiting for fill...", "info")
+        log(f"  {tkr}: buy order placed — waiting for fill…", "info")
         filled = wait_for_fill(order_id)
 
         if filled is None:
-            log(f"{tkr}: fill timeout or rejected", "error")
+            log(f"  {tkr}: fill timeout or rejected", "error")
             continue
 
         entry_price = float(filled["filled_avg_price"])
         qty         = float(filled["filled_qty"])
         stop_price  = round(entry_price * (1 - STOP_LOSS_PCT), 2)
 
-        log(f"{tkr}: filled @ ${entry_price:.2f}  qty={qty:.4f}", "ok")
+        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={qty:.4f}", "ok")
 
         stop = place_stop_order_internal(tkr, qty, stop_price)
         if stop.get("id"):
-            log(f"{tkr}: stop placed @ ${stop_price:.2f}", "ok")
+            log(f"  {tkr}: stop-loss placed @ ${stop_price:.2f} (3% below entry)", "ok")
         else:
-            log(f"{tkr}: stop placement failed — {stop.get('message', '')}", "error")
+            log(f"  {tkr}: stop placement failed — {stop.get('message', '')}", "error")
 
-    log("Scan complete", "ok")
+    log("── Scan complete ──", "ok")
 
 
 # ── Scheduler setup ───────────────────────────────────────────────────────────
@@ -359,7 +473,9 @@ def save_tickers_route():
 
 @app.route("/api/scan", methods=["POST"])
 def trigger_scan():
-    thread = threading.Thread(target=run_scan, daemon=True)
+    body   = request.get_json(silent=True) or {}
+    source = body.get("source")  # "finviz" | "manual" | None (auto-detect)
+    thread = threading.Thread(target=run_scan, args=(source,), daemon=True)
     thread.start()
     return jsonify({"ok": True, "msg": "Scan started"})
 
