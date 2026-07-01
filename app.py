@@ -22,53 +22,15 @@ import yfinance as yf
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request
 
-try:
-    import finvizfinance.util as _finviz_util
-    from finvizfinance.screener.overview import Overview as FinvizOverview
-    FINVIZ_AVAILABLE = True
-
-    # finvizfinance ships a hardcoded, years-out-of-date Chrome UA and no other
-    # browser headers, which Finviz's bot-protection flags as non-browser
-    # traffic (especially from cloud/datacenter IPs like Render's). Give it a
-    # full, current browser fingerprint instead.
-    _finviz_util.headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://finviz.com/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-except ImportError:
-    FINVIZ_AVAILABLE = False
-
 app = Flask(__name__)
 
 ET = pytz.timezone("America/New_York")
 
 ALPACA_BASE_URL = os.environ.get("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
+ALPACA_DATA_URL = os.environ.get("ALPACA_DATA_URL", "https://data.alpaca.markets")
 ALPACA_API_KEY  = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET   = os.environ.get("ALPACA_SECRET", "")
 CRON_SECRET     = os.environ.get("CRON_SECRET", "")   # set this in Render env vars
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")  # scraperapi.com key — routes Finviz requests around Render's blocked IP
-
-if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
-    _proxy_url = f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
-    _finviz_util.set_proxy({"http": _proxy_url, "https": _proxy_url})
-    # ScraperAPI's proxy port terminates TLS itself (it has to, to strip
-    # Cloudflare's challenge) and presents its own cert, not finviz.com's —
-    # so verifying against the real finviz.com cert always fails here.
-    # This only affects the dedicated finvizfinance session, not Alpaca/yfinance.
-    _finviz_util.session.verify = False
-    # requests silently overrides session.verify with the REQUESTS_CA_BUNDLE
-    # env var (set above for Alpaca/yfinance) unless verify is passed
-    # per-call or trust_env is off — finvizfinance never passes verify
-    # explicitly, so trust_env must be disabled here for verify=False to stick.
-    _finviz_util.session.trust_env = False
-    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
@@ -306,58 +268,69 @@ def is_trading_day() -> bool:
         return True  # fail open so scan isn't silently skipped
 
 
-def fetch_finviz_tickers():
-    """Pull tickers from Finviz using today's intraday data: market cap >$300M, price >$3, change >10%."""
-    if not FINVIZ_AVAILABLE:
-        log("finvizfinance not installed — cannot use Finviz source", "error")
+def fetch_alpaca_movers():
+    """
+    Pull today's top gainers from Alpaca's own Market Data API (no scraping,
+    same keys already used for trading) and apply the same coarse filter
+    Finviz used to: market cap >$300M, price >$3, change >10%.
+    Alpaca's movers endpoint doesn't support a market-cap filter, so that
+    part is applied afterward via yfinance, scoped to the (small) candidate
+    list that already passed the price/change filters.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    log(f"Fetching movers from Alpaca for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
+
+    try:
+        r = requests.get(
+            f"{ALPACA_DATA_URL}/v1beta1/screener/stocks/movers",
+            headers=alpaca_headers(), params={"top": 50}, timeout=10,
+        )
+        r.raise_for_status()
+        gainers = r.json().get("gainers", [])
+    except Exception as e:
+        log(f"Alpaca movers fetch failed: {e}", "error")
         return []
 
-    today = datetime.now(ET).strftime("%Y-%m-%d")
-    log(f"Fetching tickers from Finviz for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
+    candidates = [
+        g["symbol"] for g in gainers
+        if g.get("symbol") and g.get("price", 0) > 3 and g.get("percent_change", 0) > 10
+    ]
+    if not candidates:
+        log("Alpaca movers returned no candidates matching price/change criteria", "warn")
+        return []
 
-    attempts = 3
-    for attempt in range(1, attempts + 1):
+    tickers = []
+    cap_lookup_failed = []
+    for sym in candidates:
         try:
-            if attempt == 1:
-                # Warm up the session with a plain page hit first — some
-                # Cloudflare rules require a valid prior page visit/cookie
-                # before allowing the screener endpoint.
-                _finviz_util.session.get(
-                    "https://finviz.com/", headers=_finviz_util.headers,
-                    timeout=_finviz_util.timeout_value, proxies=_finviz_util.proxy_dict,
-                )
-            fov = FinvizOverview()
-            fov.set_filter(filters_dict={
-                "Market Cap.": "+Small (over $300mln)",
-                "Price":       "Over $3",
-                "Change":      "Up 10%",
-            })
-            df = fov.screener_view(order="Change", verbose=0)
-            if df is None or df.empty:
-                log("Finviz returned no tickers matching criteria today", "warn")
-                return []
-            tickers = df["Ticker"].tolist()
-            log(f"Finviz returned {len(tickers)} ticker(s) for {today}: {', '.join(tickers[:20])}{'…' if len(tickers) > 20 else ''}", "info")
-            return tickers
+            cap = yf.Ticker(sym).fast_info.get("market_cap")
         except Exception as e:
-            if attempt < attempts:
-                wait = 2 ** attempt
-                log(f"Finviz fetch failed (attempt {attempt}/{attempts}): {e} — retrying in {wait}s", "warn")
-                time.sleep(wait)
-            else:
-                log(f"Finviz fetch failed: {e}", "error")
-    return []
+            log(f"  {sym}: market cap lookup failed ({e}) — excluded", "warn")
+            cap_lookup_failed.append(sym)
+            continue
+        if cap and cap > 300_000_000:
+            tickers.append(sym)
+
+    if cap_lookup_failed:
+        log(f"{len(cap_lookup_failed)} candidate(s) excluded due to market cap lookup failure: {', '.join(cap_lookup_failed)}", "warn")
+
+    if not tickers:
+        log("No Alpaca movers passed the market cap filter", "warn")
+        return []
+
+    log(f"Alpaca movers returned {len(tickers)} ticker(s) for {today}: {', '.join(tickers[:20])}{'…' if len(tickers) > 20 else ''}", "info")
+    return tickers
 
 
 def run_scan(source: str = None):
     """
-    source='finviz' — pull from Finviz screener (used in automated mode)
+    source='alpaca' — pull from Alpaca's Market Data movers endpoint (used in automated mode)
     source='manual' — use the user's ticker list (used in manual mode)
     source=None     — auto-detect based on saved mode setting
     """
     data = load_tickers()
     if source is None:
-        source = "finviz" if data.get("mode") == "automated" else "manual"
+        source = "alpaca" if data.get("mode") == "automated" else "manual"
 
     today = datetime.now(ET).strftime("%Y-%m-%d")
     log(f"── Scan started for {today} (source: {source}) ──", "info")
@@ -367,10 +340,10 @@ def run_scan(source: str = None):
         return
 
     # ── Get ticker list ───────────────────────────────────────────────────────
-    if source == "finviz":
-        tickers = fetch_finviz_tickers()
+    if source == "alpaca":
+        tickers = fetch_alpaca_movers()
         if not tickers:
-            log("Scan aborted — no tickers from Finviz", "warn")
+            log("Scan aborted — no tickers from Alpaca movers", "warn")
             return
     else:
         tickers = data.get("tickers", [])
@@ -463,9 +436,9 @@ def run_scan(source: str = None):
 
 def reschedule(time_str: str, mode: str):
     """
-    Always schedules the Finviz scan at the given time on weekdays.
+    Always schedules the Alpaca movers scan at the given time on weekdays.
     mode only controls whether the dashboard 'Run scan now' button uses
-    Finviz or the manual list — the scheduled job always uses Finviz.
+    Alpaca movers or the manual list — the scheduled job always uses Alpaca.
     """
     scheduler.remove_all_jobs()
     if time_str:
@@ -473,13 +446,13 @@ def reschedule(time_str: str, mode: str):
             hour, minute = map(int, time_str.split(":"))
             scheduler.add_job(
                 run_scan, "cron",
-                args=("finviz",),
+                args=("alpaca",),
                 hour=hour, minute=minute,
                 id="daily_scan",
                 day_of_week="mon-fri",
                 timezone=ET,
             )
-            log(f"Finviz scan scheduled at {time_str} ET every weekday", "info")
+            log(f"Alpaca movers scan scheduled at {time_str} ET every weekday", "info")
         except Exception as e:
             log(f"Schedule error: {e}", "error")
 
@@ -536,7 +509,7 @@ def save_tickers_route():
 @app.route("/api/scan", methods=["POST"])
 def trigger_scan():
     body   = request.get_json(silent=True) or {}
-    source = body.get("source")  # "finviz" | "manual" | None (auto-detect)
+    source = body.get("source")  # "alpaca" | "manual" | None (auto-detect)
     thread = threading.Thread(target=run_scan, args=(source,), daemon=True)
     thread.start()
     return jsonify({"ok": True, "msg": "Scan started"})
@@ -546,16 +519,16 @@ def trigger_scan():
 def cron_scan():
     """
     External cron trigger endpoint — called by cron-job.org at 3:50 PM ET daily.
-    Protected by CRON_SECRET env var. Always runs Finviz scan.
+    Protected by CRON_SECRET env var. Always runs the Alpaca movers scan.
     """
     secret = request.args.get("secret") or (request.get_json(silent=True) or {}).get("secret", "")
     if CRON_SECRET and secret != CRON_SECRET:
         return jsonify({"error": "unauthorized"}), 401
     now_et = datetime.now(ET).strftime("%Y-%m-%d %H:%M ET")
-    log(f"Cron trigger received at {now_et} — starting Finviz scan", "info")
-    thread = threading.Thread(target=run_scan, args=("finviz",), daemon=True)
+    log(f"Cron trigger received at {now_et} — starting Alpaca movers scan", "info")
+    thread = threading.Thread(target=run_scan, args=("alpaca",), daemon=True)
     thread.start()
-    return jsonify({"ok": True, "msg": f"Finviz scan started at {now_et}"})
+    return jsonify({"ok": True, "msg": f"Alpaca movers scan started at {now_et}"})
 
 
 @app.route("/api/orders/stop", methods=["POST"])
@@ -615,10 +588,6 @@ def boot():
     reschedule(data.get("schedule", "15:50"), data.get("mode", "manual"))
     if not scheduler.running:
         scheduler.start()
-    if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
-        log("Finviz requests will route through ScraperAPI proxy", "info")
-    elif FINVIZ_AVAILABLE:
-        log("SCRAPER_API_KEY not set — Finviz requests go direct (may be blocked on Render)", "warn")
     log("HVE Action started", "info")
 
 

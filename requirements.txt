@@ -5,5 +5,4 @@ certifi
 pytz
 yfinance
 APScheduler
-finvizfinance
 pip-system-certs

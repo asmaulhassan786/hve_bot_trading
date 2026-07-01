@@ -865,7 +865,7 @@ async function runScan() {
   const isAuto = mode === 'automated';
   if (!isAuto && !tickers.length) { showToast('Add tickers to your scan list first', 'err'); return; }
   document.getElementById('scan-btn').disabled = true;
-  const source = isAuto ? 'finviz' : 'manual';
+  const source = isAuto ? 'alpaca' : 'manual';
   addLog(`Scan triggered (${source})`, 'info');
   await fetch('/api/scan', {
     method: 'POST',
