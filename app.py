@@ -58,6 +58,12 @@ SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")  # scraperapi.com key â€
 if FINVIZ_AVAILABLE and SCRAPER_API_KEY:
     _proxy_url = f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
     _finviz_util.set_proxy({"http": _proxy_url, "https": _proxy_url})
+    # ScraperAPI's proxy port terminates TLS itself (it has to, to strip
+    # Cloudflare's challenge) and presents its own cert, not finviz.com's â€”
+    # so verifying against the real finviz.com cert always fails here.
+    # This only affects the dedicated finvizfinance session, not Alpaca/yfinance.
+    _finviz_util.session.verify = False
+    requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
