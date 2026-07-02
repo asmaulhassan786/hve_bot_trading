@@ -412,7 +412,7 @@ def check_breakeven_stops():
 def fetch_fmp_quotes(symbols: list) -> dict:
     """
     Company profile lookup via Financial Modeling Prep. Returns
-    {symbol: {"market_cap": ..., "name": ...}}.
+    {symbol: {"market_cap": ..., "name": ..., "is_etf": ...}}.
     FMP's real-time "quote" endpoints are paid-plan-only (confirmed via 402
     Restricted Endpoint with a real key); "profile" is fundamentals data
     (updated periodically, not real-time — fine for a >$300M cap check) and
@@ -443,20 +443,22 @@ def fetch_fmp_quotes(symbols: list) -> dict:
             results[sym] = {
                 "market_cap": data.get("marketCap") or data.get("mktCap"),
                 "name": data.get("companyName") or data.get("name", ""),
+                "is_etf": bool(data.get("isEtf") or data.get("isFund")),
             }
         except Exception as e:
             log(f"FMP profile lookup failed for {sym}: {e}", "error")
     return results
 
 
+_ETF_NAME_HINTS = ("etf", "ishares", "spdr", "proshares", "direxion", "vaneck")
+
+
 def fetch_alpaca_movers():
     """
     Pull today's top gainers from Alpaca's own Market Data API (no scraping,
-    same keys already used for trading) and apply the same coarse filter
-    Finviz used to: market cap >$300M, price >$3, change >10%.
-    Alpaca's movers endpoint doesn't support a market-cap filter, so that
-    part is applied afterward via FMP, scoped to the (small) candidate
-    list that already passed the price/change filters.
+    same keys already used for trading), strip out warrants/rights and
+    ETFs/funds first, then apply the same coarse filter Finviz used to:
+    market cap >$300M, price >$3, change >10%.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     log(f"Fetching movers from Alpaca for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
@@ -479,43 +481,69 @@ def fetch_alpaca_movers():
         "info",
     )
 
+    symbols = [g["symbol"] for g in gainers if g.get("symbol")]
+    if not symbols:
+        log("Alpaca movers returned no symbols", "warn")
+        return []
+
+    # ── Strip warrants/rights and ETFs/funds FIRST, before any other filter ──
+    # ".WS"/".WT" suffixes are an unambiguous warrant/rights ticker
+    # convention — no API call needed, so this runs immediately.
+    non_suffix_warrants = [s for s in symbols if s.split(".")[-1] not in ("WS", "WT")]
+    dropped_suffix = [s for s in symbols if s not in non_suffix_warrants]
+    if dropped_suffix:
+        log(f"Dropped warrant/rights ticker(s) by suffix: {', '.join(dropped_suffix)}", "info")
+    if not non_suffix_warrants:
+        log("Nothing left after warrant-suffix filter", "warn")
+        return []
+
+    # No-separator warrants (e.g. "RAAQW") and ETFs both need a name/metadata
+    # lookup — this reuses the same FMP profile call the market-cap filter
+    # needs later, so it's not an extra round of requests.
+    quotes = fetch_fmp_quotes(non_suffix_warrants)
+
+    clean_symbols, dropped_warrant_name, dropped_etf, lookup_failed = [], [], [], []
+    for sym in non_suffix_warrants:
+        q = quotes.get(sym)
+        if q is None:
+            lookup_failed.append(sym)
+            continue
+        name_lower = (q.get("name") or "").lower()
+        if "warrant" in name_lower:
+            dropped_warrant_name.append(sym)
+        elif q.get("is_etf") or any(h in name_lower for h in _ETF_NAME_HINTS):
+            dropped_etf.append(sym)
+        else:
+            clean_symbols.append(sym)
+
+    if dropped_warrant_name:
+        log(f"Dropped warrant ticker(s) by name: {', '.join(dropped_warrant_name)}", "info")
+    if dropped_etf:
+        log(f"Dropped ETF/fund ticker(s): {', '.join(dropped_etf)}", "info")
+    if lookup_failed:
+        log(f"{len(lookup_failed)} ticker(s) excluded — FMP profile lookup failed: {', '.join(lookup_failed)}", "warn")
+    if not clean_symbols:
+        log("Nothing left after warrant/ETF filter", "warn")
+        return []
+
+    # ── Price/change filter on the now-clean symbol set ──────────────────────
+    gainers_by_symbol = {g["symbol"]: g for g in gainers}
     candidates = [
-        g["symbol"] for g in gainers
-        if g.get("symbol") and g.get("price", 0) > 3 and g.get("percent_change", 0) > 10
+        sym for sym in clean_symbols
+        if gainers_by_symbol[sym].get("price", 0) > 3 and gainers_by_symbol[sym].get("percent_change", 0) > 10
     ]
     if not candidates:
-        log("Alpaca movers returned no candidates matching price/change criteria", "warn")
+        log("No candidates matching price/change criteria after warrant/ETF filter", "warn")
         return []
     log(f"{len(candidates)} candidate(s) passed price/change filter: {', '.join(candidates)}", "info")
 
-    # Warrants trade nothing like the underlying common stock and shouldn't
-    # be fed into this strategy. ".WS"/".WT" suffixes are an unambiguous
-    # warrant/rights ticker convention; the FMP company name is the
-    # authoritative check for the no-separator style (e.g. "RAAQW").
-    non_warrants = [s for s in candidates if not s.split(".")[-1] in ("WS", "WT")]
-    dropped_suffix = [s for s in candidates if s not in non_warrants]
-    if dropped_suffix:
-        log(f"Dropped warrant/rights ticker(s) by suffix: {', '.join(dropped_suffix)}", "info")
-
-    quotes = fetch_fmp_quotes(non_warrants)
+    # ── Market cap filter, reusing the FMP data already fetched above ───────
     tickers = []
-    cap_lookup_failed = []
-    for sym in non_warrants:
-        q = quotes.get(sym)
-        if q is None:
-            log(f"  {sym}: market cap lookup failed — excluded", "warn")
-            cap_lookup_failed.append(sym)
-            continue
-        if "warrant" in q["name"].lower():
-            log(f"  {sym}: '{q['name']}' — warrant, excluded", "info")
-            continue
-        cap = q["market_cap"]
+    for sym in candidates:
+        cap = quotes[sym]["market_cap"]
         log(f"  {sym}: market cap = {cap}", "info")
         if cap and cap > 300_000_000:
             tickers.append(sym)
-
-    if cap_lookup_failed:
-        log(f"{len(cap_lookup_failed)} candidate(s) excluded due to market cap lookup failure: {', '.join(cap_lookup_failed)}", "warn")
 
     if not tickers:
         log("No Alpaca movers passed the market cap filter", "warn")
