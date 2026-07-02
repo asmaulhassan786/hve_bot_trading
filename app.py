@@ -693,7 +693,6 @@ def get_account():
 def get_positions():
     try:
         data = fetch_positions_with_stops()
-        log(f"Synced {len(data['positions'])} position(s) from Alpaca", "info")
         return jsonify(data)
     except Exception as e:
         log(f"Sync error: {e}", "error")
