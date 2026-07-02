@@ -44,6 +44,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
 MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligible
 MOVERS_MIN_CHANGE_PCT = 10 # minimum intraday % change for an Alpaca mover to be HVE-eligible
+MOVERS_TOP_N        = 100  # how many top gainers to rank (Alpaca's own movers endpoint caps at 50)
+SNAPSHOT_BATCH_SIZE  = 200  # symbols per /v2/stocks/snapshots request
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
 ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
 BREAKEVEN_POLL_MIN   = 2   # how often to check for the breakeven trigger during market hours
@@ -455,12 +457,88 @@ def fetch_fmp_quotes(symbols: list) -> dict:
 _ETF_NAME_HINTS = ("etf", "ishares", "spdr", "proshares", "direxion", "vaneck")
 
 
+def fetch_top_gainers(top_n=MOVERS_TOP_N):
+    """
+    Rank the top N gainers across the whole tradable US equity universe,
+    computed from Alpaca's own snapshot data. Alpaca's /v1beta1/screener
+    movers endpoint hard-caps at 50 results server-side (no pagination), so
+    to see further down the list this pulls every active/tradable us_equity
+    asset, snapshots them in batches, and computes % change ourselves.
+    Returns a list shaped like [{"symbol":, "price":, "percent_change":}, ...].
+    """
+    try:
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/assets",
+            headers=alpaca_headers(),
+            params={"status": "active", "asset_class": "us_equity"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        assets = r.json()
+    except Exception as e:
+        log(f"Alpaca assets fetch failed: {e}", "error")
+        return []
+
+    if not isinstance(assets, list):
+        log(f"Alpaca assets returned unexpected response: {assets}", "error")
+        return []
+
+    symbols = [
+        a["symbol"] for a in assets
+        if a.get("tradable") and a.get("exchange") != "OTC" and a.get("symbol")
+    ]
+    log(f"Alpaca assets: {len(assets)} total, {len(symbols)} tradable non-OTC equities to snapshot", "info")
+    if not symbols:
+        return []
+
+    movers = []
+    batches_failed = 0
+    for i in range(0, len(symbols), SNAPSHOT_BATCH_SIZE):
+        batch = symbols[i:i + SNAPSHOT_BATCH_SIZE]
+        try:
+            r = requests.get(
+                f"{ALPACA_DATA_URL}/v2/stocks/snapshots",
+                headers=alpaca_headers(),
+                params={"symbols": ",".join(batch)},
+                timeout=15,
+            )
+            r.raise_for_status()
+            snapshots = r.json()
+        except Exception as e:
+            batches_failed += 1
+            log(f"Snapshot batch {i // SNAPSHOT_BATCH_SIZE + 1} failed ({len(batch)} symbols): {e}", "warn")
+            continue
+
+        if not isinstance(snapshots, dict):
+            batches_failed += 1
+            continue
+
+        for sym, snap in snapshots.items():
+            if not isinstance(snap, dict):
+                continue
+            price = (snap.get("latestTrade") or {}).get("p")
+            prev_close = (snap.get("prevDailyBar") or {}).get("c")
+            if not price or not prev_close:
+                continue
+            pct_change = (price - prev_close) / prev_close * 100
+            movers.append({"symbol": sym, "price": price, "percent_change": pct_change})
+
+    if batches_failed:
+        log(f"{batches_failed} snapshot batch(es) failed and were skipped", "warn")
+    if not movers:
+        log("No usable snapshot data — 0 gainers computed", "error")
+        return []
+
+    movers.sort(key=lambda m: m["percent_change"], reverse=True)
+    return movers[:top_n]
+
+
 def fetch_alpaca_movers():
     """
-    Pull today's top gainers from Alpaca's own Market Data API (no scraping,
-    same keys already used for trading), strip out warrants/rights and
-    ETFs/funds first, then apply the same coarse filter Finviz used to:
-    market cap >$300M, price >$MOVERS_MIN_PRICE, change >MOVERS_MIN_CHANGE_PCT%.
+    Pull today's top gainers (see fetch_top_gainers), strip out
+    warrants/rights and ETFs/funds first, then apply the same coarse filter
+    Finviz used to: market cap >$300M, price >$MOVERS_MIN_PRICE,
+    change >MOVERS_MIN_CHANGE_PCT%.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     log(
@@ -469,20 +547,14 @@ def fetch_alpaca_movers():
         "info",
     )
 
-    try:
-        r = requests.get(
-            f"{ALPACA_DATA_URL}/v1beta1/screener/stocks/movers",
-            headers=alpaca_headers(), params={"top": 50}, timeout=10,
-        )
-        r.raise_for_status()
-        gainers = r.json().get("gainers", [])
-    except Exception as e:
-        log(f"Alpaca movers fetch failed: {e}", "error")
+    gainers = fetch_top_gainers()
+    if not gainers:
+        log("No gainers computed from Alpaca snapshots", "warn")
         return []
 
     log(
-        f"Alpaca returned {len(gainers)} raw gainer(s): "
-        + ", ".join(f"{g.get('symbol')}(${g.get('price')}, {g.get('percent_change')}%)" for g in gainers[:20])
+        f"Top {len(gainers)} gainer(s) ranked from full market snapshot: "
+        + ", ".join(f"{g.get('symbol')}(${g.get('price')}, {g.get('percent_change'):.2f}%)" for g in gainers[:20])
         + ("…" if len(gainers) > 20 else ""),
         "info",
     )
