@@ -45,6 +45,7 @@ DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configur
 MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligible
 MOVERS_MIN_CHANGE_PCT = 10 # minimum intraday % change for an Alpaca mover to be HVE-eligible
 SNAPSHOT_BATCH_SIZE  = 200  # symbols per /v2/stocks/snapshots request
+MIN_TODAY_VOLUME_FOR_MOVER = 5000  # sanity floor so a single stale/thin extended-hours print can't fake a "10% gainer"
 MIN_IPO_AGE_DAYS    = 28    # stock must have been trading at least this many days (4 weeks)
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
 ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
@@ -530,7 +531,15 @@ def fetch_top_gainers(min_change_pct=MOVERS_MIN_CHANGE_PCT):
                 continue
             price = (snap.get("latestTrade") or {}).get("p")
             prev_close = (snap.get("prevDailyBar") or {}).get("c")
+            today_volume = (snap.get("dailyBar") or {}).get("v", 0)
             if not price or not prev_close:
+                continue
+            # A single stale/thin extended-hours trade print can make an
+            # illiquid ticker look like a double-digit gainer with zero real
+            # trading behind it. Require actual volume today before trusting
+            # the computed % change — this is a sanity floor, not the real
+            # HVE volume check (that compares against 2yr history later).
+            if not today_volume or today_volume < MIN_TODAY_VOLUME_FOR_MOVER:
                 continue
             pct_change = (price - prev_close) / prev_close * 100
             if pct_change >= min_change_pct:
@@ -539,7 +548,7 @@ def fetch_top_gainers(min_change_pct=MOVERS_MIN_CHANGE_PCT):
     if batches_failed:
         log(f"{batches_failed} snapshot batch(es) failed and were skipped", "warn")
     if not movers:
-        log(f"No gainers found at or above {min_change_pct}%", "warn")
+        log(f"No gainers found at or above {min_change_pct}% with real trading volume today", "warn")
         return []
 
     movers.sort(key=lambda m: m["percent_change"], reverse=True)
