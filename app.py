@@ -44,7 +44,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
 MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligible
 MOVERS_MIN_CHANGE_PCT = 10 # minimum intraday % change for an Alpaca mover to be HVE-eligible
-MOVERS_TOP_N        = 100  # how many top gainers to rank (Alpaca's own movers endpoint caps at 50)
 SNAPSHOT_BATCH_SIZE  = 200  # symbols per /v2/stocks/snapshots request
 MIN_IPO_AGE_DAYS    = 28    # stock must have been trading at least this many days (4 weeks)
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
@@ -468,13 +467,15 @@ def fetch_fmp_quotes(symbols: list) -> dict:
 _ETF_NAME_HINTS = ("etf", "ishares", "spdr", "proshares", "direxion", "vaneck")
 
 
-def fetch_top_gainers(top_n=MOVERS_TOP_N):
+def fetch_top_gainers(min_change_pct=MOVERS_MIN_CHANGE_PCT):
     """
-    Rank the top N gainers across the whole tradable US equity universe,
-    computed from Alpaca's own snapshot data. Alpaca's /v1beta1/screener
-    movers endpoint hard-caps at 50 results server-side (no pagination), so
-    to see further down the list this pulls every active/tradable us_equity
-    asset, snapshots them in batches, and computes % change ourselves.
+    Find every gainer at or above min_change_pct across the whole tradable
+    US equity universe, computed from Alpaca's own snapshot data. Alpaca's
+    /v1beta1/screener movers endpoint hard-caps at 50 results server-side
+    (no pagination), which silently drops legitimate gainers ranked lower —
+    this pulls every active/tradable us_equity asset, snapshots them in
+    batches, and computes % change ourselves so nothing above the threshold
+    is missed regardless of how many stocks qualify.
     Returns a list shaped like [{"symbol":, "price":, "percent_change":}, ...].
     """
     try:
@@ -532,16 +533,17 @@ def fetch_top_gainers(top_n=MOVERS_TOP_N):
             if not price or not prev_close:
                 continue
             pct_change = (price - prev_close) / prev_close * 100
-            movers.append({"symbol": sym, "price": price, "percent_change": pct_change})
+            if pct_change >= min_change_pct:
+                movers.append({"symbol": sym, "price": price, "percent_change": pct_change})
 
     if batches_failed:
         log(f"{batches_failed} snapshot batch(es) failed and were skipped", "warn")
     if not movers:
-        log("No usable snapshot data — 0 gainers computed", "error")
+        log(f"No gainers found at or above {min_change_pct}%", "warn")
         return []
 
     movers.sort(key=lambda m: m["percent_change"], reverse=True)
-    return movers[:top_n]
+    return movers
 
 
 def fetch_alpaca_movers():
@@ -564,7 +566,7 @@ def fetch_alpaca_movers():
         return []
 
     log(
-        f"Top {len(gainers)} gainer(s) ranked from full market snapshot: "
+        f"{len(gainers)} gainer(s) ≥{MOVERS_MIN_CHANGE_PCT}% found across full market snapshot: "
         + ", ".join(f"{g.get('symbol')}(${g.get('price')}, {g.get('percent_change'):.2f}%)" for g in gainers[:20])
         + ("…" if len(gainers) > 20 else ""),
         "info",
