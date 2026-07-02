@@ -37,11 +37,14 @@ FMP_API_KEY     = os.environ.get("FMP_API_KEY", "")    # financialmodelingprep.c
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
 LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
+POSITION_META_FILE = os.path.join(DATA_DIR, "position_meta.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
-STOP_LOSS_PCT      = 0.03
+ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
+ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
+BREAKEVEN_POLL_MIN   = 2   # how often to check for the breakeven trigger during market hours
 
 activity_log = deque(maxlen=200)
 _log_lock = threading.Lock()
@@ -118,6 +121,23 @@ def save_tickers(data: dict):
         json.dump(data, f, indent=2)
 
 
+# ── Position metadata (entry ATR, breakeven state) ──────────────────────────────
+# Alpaca's own /positions doesn't know the ATR a stop was sized from, so this
+# tracks per-symbol {"entry_atr": ..., "breakeven_triggered": ...} locally.
+
+def load_position_meta() -> dict:
+    try:
+        with open(POSITION_META_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_position_meta(meta: dict):
+    with open(POSITION_META_FILE, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
 # ── Position + stop merge ─────────────────────────────────────────────────────
 
 def fetch_positions_with_stops():
@@ -174,10 +194,28 @@ def fetch_positions_with_stops():
 
 # ── Scan logic ────────────────────────────────────────────────────────────────
 
+def compute_atr14(daily) -> float:
+    """
+    14-period ATR from a daily OHLC DataFrame (needs >=15 completed bars).
+    Excludes the last row, which is today's still-forming bar during market
+    hours — same convention as the 2-year volume comparison below.
+    """
+    d = daily.iloc[:-1]
+    highs, lows, closes = d["High"].tolist(), d["Low"].tolist(), d["Close"].tolist()
+    if len(closes) < 15:
+        return None
+    trs = [
+        max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        for i in range(1, len(closes))
+    ]
+    return sum(trs[-14:]) / 14
+
+
 def get_quote_and_volume(ticker: str):
     """
-    Fetch intraday range + 2-year max volume using yfinance (full SIP market volume).
-    SSL env vars are set at module load so this works on both Linux (Render) and Windows.
+    Fetch intraday range, 2-year max volume, and 14-day ATR using yfinance
+    (full SIP market volume). SSL env vars are set at module load so this
+    works on both Linux (Render) and Windows.
     Returns None if data is unavailable or insufficient.
     """
     try:
@@ -198,6 +236,10 @@ def get_quote_and_volume(ticker: str):
         # Exclude today so we compare against historical max only
         max_2y_vol = int(daily["Volume"].iloc[:-1].max())
 
+        atr14 = compute_atr14(daily)
+        if atr14 is None:
+            return None
+
         return {
             "ticker":    ticker,
             "price":     round(price, 2),
@@ -205,6 +247,7 @@ def get_quote_and_volume(ticker: str):
             "high":      round(day_high, 2),
             "today_vol": today_vol,
             "max_2y_vol": max_2y_vol,
+            "atr14":     atr14,
         }
     except Exception:
         return None
@@ -268,6 +311,96 @@ def is_trading_day() -> bool:
     except Exception as e:
         log(f"Calendar check failed: {e} — assuming trading day", "warn")
         return True  # fail open so scan isn't silently skipped
+
+
+def is_market_open() -> bool:
+    now = datetime.now(ET)
+    return now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (16, 0)
+
+
+def get_latest_trade_price(ticker: str) -> float:
+    try:
+        r = requests.get(
+            f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/trades/latest",
+            headers=alpaca_headers(), timeout=10,
+        )
+        return float(r.json()["trade"]["p"])
+    except Exception:
+        try:
+            hist = yf.Ticker(ticker).history(period="1d", interval="1m")
+            return float(hist["Close"].iloc[-1]) if not hist.empty else 0.0
+        except Exception:
+            return 0.0
+
+
+def check_breakeven_stops():
+    """
+    Runs every BREAKEVEN_POLL_MIN minutes during market hours. For each open
+    position that hasn't hit breakeven yet, checks whether price has risen
+    ATR_BREAKEVEN_MULT x ATR(14) above entry — if so, cancels the existing
+    stop and replaces it with one at entry price (breakeven).
+    """
+    if not is_market_open():
+        return
+
+    meta = load_position_meta()
+    if not meta:
+        return
+
+    positions_raw = alpaca_get("/positions")
+    if not isinstance(positions_raw, list):
+        log(f"Breakeven check: failed to fetch positions — {positions_raw}", "error")
+        return
+    alpaca_positions = {p["symbol"]: p for p in positions_raw}
+    open_orders = alpaca_get("/orders?status=open&limit=100")
+    stop_orders = {}
+    if isinstance(open_orders, list):
+        for o in open_orders:
+            if o.get("type") == "stop" and o.get("side") == "sell":
+                stop_orders[o["symbol"]] = o
+
+    changed = False
+    for sym in list(meta.keys()):
+        m = meta[sym]
+        if sym not in alpaca_positions:
+            # position closed (stop hit, manual sell, etc.) — drop stale metadata
+            del meta[sym]
+            changed = True
+            continue
+        if m.get("breakeven_triggered"):
+            continue
+
+        atr = m.get("entry_atr")
+        if not atr:
+            continue
+
+        entry   = float(alpaca_positions[sym]["avg_entry_price"])
+        qty     = float(alpaca_positions[sym]["qty"])
+        trigger = entry + ATR_BREAKEVEN_MULT * atr
+
+        current = get_latest_trade_price(sym)
+        if current <= 0 or current < trigger:
+            continue
+
+        existing_stop = stop_orders.get(sym)
+        if existing_stop:
+            alpaca_delete(f"/orders/{existing_stop['id']}")
+
+        result = place_stop_order_internal(sym, qty, entry)
+        if result.get("id"):
+            log(
+                f"{sym}: price ${current:.2f} reached breakeven trigger "
+                f"${trigger:.2f} (entry ${entry:.2f} + {ATR_BREAKEVEN_MULT}x ATR) "
+                f"— stop moved to breakeven @ ${entry:.2f}",
+                "ok",
+            )
+            m["breakeven_triggered"] = True
+            changed = True
+        else:
+            log(f"{sym}: breakeven stop replacement failed — {result.get('message', 'unknown error')}", "error")
+
+    if changed:
+        save_position_meta(meta)
 
 
 def fetch_fmp_quotes(symbols: list) -> dict:
@@ -462,6 +595,7 @@ def run_scan(source: str = None):
     buy_amount = data.get("buy_amount", DEFAULT_BUY_AMOUNT)
     log(f"Placing ~${buy_amount} buy orders (whole shares, rounded up) for qualified stocks…", "info")
     existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
+    position_meta = load_position_meta()
 
     for s in qualified:
         tkr = s["ticker"]
@@ -489,13 +623,16 @@ def run_scan(source: str = None):
 
         entry_price = float(filled["filled_avg_price"])
         qty         = float(filled["filled_qty"])
-        stop_price  = round(entry_price * (1 - STOP_LOSS_PCT), 2)
+        atr         = s["atr14"]
+        stop_price  = round(entry_price - ATR_STOP_MULT * atr, 2)
 
-        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={int(qty)}", "ok")
+        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={int(qty)}  ATR14=${atr:.2f}", "ok")
 
         stop = place_stop_order_internal(tkr, qty, stop_price)
         if stop.get("id"):
-            log(f"  {tkr}: stop-loss placed @ ${stop_price:.2f} (3% below entry)", "ok")
+            log(f"  {tkr}: stop-loss placed @ ${stop_price:.2f} ({ATR_STOP_MULT}x ATR below entry)", "ok")
+            position_meta[tkr] = {"entry_atr": atr, "breakeven_triggered": False}
+            save_position_meta(position_meta)
         else:
             log(f"  {tkr}: stop placement failed — {stop.get('message', '')}", "error")
 
@@ -510,7 +647,8 @@ def reschedule(time_str: str, mode: str):
     mode only controls whether the dashboard 'Run scan now' button uses
     Alpaca movers or the manual list — the scheduled job always uses Alpaca.
     """
-    scheduler.remove_all_jobs()
+    if scheduler.get_job("daily_scan"):
+        scheduler.remove_job("daily_scan")
     if time_str:
         try:
             hour, minute = map(int, time_str.split(":"))
@@ -521,6 +659,7 @@ def reschedule(time_str: str, mode: str):
                 id="daily_scan",
                 day_of_week="mon-fri",
                 timezone=ET,
+                replace_existing=True,
             )
             log(f"Alpaca movers scan scheduled at {time_str} ET every weekday", "info")
         except Exception as e:
@@ -656,8 +795,15 @@ def get_log():
 def boot():
     data = load_tickers()
     reschedule(data.get("schedule", "15:50"), data.get("mode", "automated"))
+    scheduler.add_job(
+        check_breakeven_stops, "interval",
+        minutes=BREAKEVEN_POLL_MIN,
+        id="breakeven_check",
+        replace_existing=True,
+    )
     if not scheduler.running:
         scheduler.start()
+    log(f"Breakeven check scheduled every {BREAKEVEN_POLL_MIN} min during market hours", "info")
     log("HVE Action started", "info")
 
 
