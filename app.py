@@ -46,6 +46,7 @@ MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligibl
 MOVERS_MIN_CHANGE_PCT = 10 # minimum intraday % change for an Alpaca mover to be HVE-eligible
 MOVERS_TOP_N        = 100  # how many top gainers to rank (Alpaca's own movers endpoint caps at 50)
 SNAPSHOT_BATCH_SIZE  = 200  # symbols per /v2/stocks/snapshots request
+MIN_IPO_AGE_DAYS    = 28    # stock must have been trading at least this many days (4 weeks)
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
 ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
 BREAKEVEN_POLL_MIN   = 2   # how often to check for the breakeven trigger during market hours
@@ -250,6 +251,15 @@ def get_quote_and_volume(ticker: str):
         if atr14 is None:
             return None
 
+        # Earliest bar in the 2y window doubles as an IPO-age proxy: a
+        # recent IPO simply has no data before its first trading day, so
+        # this reflects true listing age (not just capped by the 2y window)
+        # for any stock younger than 2 years.
+        first_bar_date = daily.index[0]
+        if hasattr(first_bar_date, "date"):
+            first_bar_date = first_bar_date.date()
+        age_days = (datetime.now(ET).date() - first_bar_date).days
+
         return {
             "ticker":    ticker,
             "price":     round(price, 2),
@@ -258,6 +268,7 @@ def get_quote_and_volume(ticker: str):
             "today_vol": today_vol,
             "max_2y_vol": max_2y_vol,
             "atr14":     atr14,
+            "age_days":  age_days,
         }
     except Exception:
         return None
@@ -677,7 +688,11 @@ def run_scan(source: str = None):
 
     # ── Apply HVE criteria to every ticker ───────────────────────────────────
     log(f"Applying HVE criteria to all {len(tickers)} ticker(s)…", "info")
-    log("HVE criteria: (1) price ≥70% of day high-low range  (2) today's SIP vol ≥ 2-year daily high", "info")
+    log(
+        "HVE criteria: (1) price ≥70% of day high-low range  (2) today's SIP vol ≥ 2-year daily high"
+        f"  (3) stock ≥{MIN_IPO_AGE_DAYS} days old",
+        "info",
+    )
 
     qualified  = []
     eliminated = []
@@ -696,17 +711,19 @@ def run_scan(source: str = None):
         pos_pct = round(pos * 100, 1)
         rng_ok  = pos >= 0.70
         vol_ok  = q["today_vol"] >= q["max_2y_vol"]
+        age_ok  = q["age_days"] >= MIN_IPO_AGE_DAYS
         vol_ratio = round(q["today_vol"] / q["max_2y_vol"], 2) if q["max_2y_vol"] else 0
 
         criteria_1 = f"range {pos_pct}% {'✓' if rng_ok else '✗ (<70%)'}"
         criteria_2 = f"vol {q['today_vol']:,} vs 2Y high {q['max_2y_vol']:,} (ratio {vol_ratio}x) {'✓' if vol_ok else '✗'}"
+        criteria_3 = f"age {q['age_days']}d {'✓' if age_ok else f'✗ (<{MIN_IPO_AGE_DAYS}d)'}"
 
-        if rng_ok and vol_ok:
+        if rng_ok and vol_ok and age_ok:
             qualified.append({**q, "range_pos": pos_pct})
-            log(f"  {tkr}: QUALIFIED — {criteria_1}  |  {criteria_2}", "ok")
+            log(f"  {tkr}: QUALIFIED — {criteria_1}  |  {criteria_2}  |  {criteria_3}", "ok")
         else:
             eliminated.append(tkr)
-            log(f"  {tkr}: eliminated — {criteria_1}  |  {criteria_2}", "info")
+            log(f"  {tkr}: eliminated — {criteria_1}  |  {criteria_2}  |  {criteria_3}", "info")
 
     log(
         f"── HVE result: {len(qualified)} qualified  {len(eliminated)} eliminated  {len(no_data)} no data ──",
