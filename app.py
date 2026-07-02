@@ -42,6 +42,8 @@ POSITION_META_FILE = os.path.join(DATA_DIR, "position_meta.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
+MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligible
+MOVERS_MIN_CHANGE_PCT = 10 # minimum intraday % change for an Alpaca mover to be HVE-eligible
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
 ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
 BREAKEVEN_POLL_MIN   = 2   # how often to check for the breakeven trigger during market hours
@@ -458,10 +460,14 @@ def fetch_alpaca_movers():
     Pull today's top gainers from Alpaca's own Market Data API (no scraping,
     same keys already used for trading), strip out warrants/rights and
     ETFs/funds first, then apply the same coarse filter Finviz used to:
-    market cap >$300M, price >$3, change >10%.
+    market cap >$300M, price >$MOVERS_MIN_PRICE, change >MOVERS_MIN_CHANGE_PCT%.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
-    log(f"Fetching movers from Alpaca for {today} (mktcap >$300M, price >$3, change >10%)…", "info")
+    log(
+        f"Fetching movers from Alpaca for {today} "
+        f"(mktcap >$300M, price >${MOVERS_MIN_PRICE}, change >{MOVERS_MIN_CHANGE_PCT}%)…",
+        "info",
+    )
 
     try:
         r = requests.get(
@@ -534,7 +540,8 @@ def fetch_alpaca_movers():
     gainers_by_symbol = {g["symbol"]: g for g in gainers}
     candidates = [
         sym for sym in clean_symbols
-        if gainers_by_symbol[sym].get("price", 0) > 3 and gainers_by_symbol[sym].get("percent_change", 0) > 10
+        if gainers_by_symbol[sym].get("price", 0) > MOVERS_MIN_PRICE
+        and gainers_by_symbol[sym].get("percent_change", 0) > MOVERS_MIN_CHANGE_PCT
     ]
     if not candidates:
         log("No candidates matching price/change criteria after warrant/ETF filter", "warn")
