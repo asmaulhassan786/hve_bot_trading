@@ -990,8 +990,9 @@ async function loadLog() {
   const logs = await r.json();
   const wrap = document.getElementById('log-wrap');
   wrap.innerHTML = '';
-  // server returns newest-first; reverse so oldest is at top, newest at bottom
-  logs.slice(0, 80).reverse().forEach(e => appendLogLine(e));
+  // server returns newest-first (already pruned to the retention window server-side);
+  // reverse so oldest is at top, newest at bottom
+  logs.slice().reverse().forEach(e => appendLogLine(e));
   wrap.scrollTop = wrap.scrollHeight;
 }
 

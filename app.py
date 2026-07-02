@@ -45,8 +45,10 @@ DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configur
 ATR_STOP_MULT       = 1.2  # initial stop = entry - 1.2x ATR(14)
 ATR_BREAKEVEN_MULT  = 1.2  # move stop to breakeven once price is +1.2x ATR(14) above entry
 BREAKEVEN_POLL_MIN   = 2   # how often to check for the breakeven trigger during market hours
+LOG_RETENTION_DAYS   = 15  # keep this many calendar days of activity log (covers ~10 trading days)
+LOG_MAX_ENTRIES      = 5000  # hard safety cap in case of runaway logging within the window
 
-activity_log = deque(maxlen=200)
+activity_log = deque(maxlen=LOG_MAX_ENTRIES)
 _log_lock = threading.Lock()
 
 scheduler = BackgroundScheduler(timezone=ET)
@@ -55,8 +57,8 @@ scheduler = BackgroundScheduler(timezone=ET)
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 def log(msg: str, level: str = "info"):
-    ts = datetime.now(ET).strftime("%H:%M:%S ET")
-    entry = {"time": ts, "msg": msg, "level": level}
+    now = datetime.now(ET)
+    entry = {"date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M:%S ET"), "msg": msg, "level": level}
     with _log_lock:
         activity_log.appendleft(entry)
     try:
@@ -65,8 +67,12 @@ def log(msg: str, level: str = "info"):
             with open(LOG_FILE) as f:
                 existing = json.load(f)
         existing.insert(0, entry)
+        # Retain by calendar day (covers ~10 trading days), not a fixed count,
+        # so the timeline survives restarts/redeploys instead of resetting.
+        cutoff = (now - timedelta(days=LOG_RETENTION_DAYS)).strftime("%Y-%m-%d")
+        existing = [e for e in existing if e.get("date", "") >= cutoff][:LOG_MAX_ENTRIES]
         with open(LOG_FILE, "w") as f:
-            json.dump(existing[:200], f)
+            json.dump(existing, f)
     except Exception:
         pass
 
