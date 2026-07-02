@@ -499,7 +499,10 @@ def fetch_alpaca_movers():
 
     # No-separator warrants (e.g. "RAAQW") and ETFs both need a name/metadata
     # lookup — this reuses the same FMP profile call the market-cap filter
-    # needs later, so it's not an extra round of requests.
+    # needs later, so it's not an extra round of requests. A failed lookup
+    # can't be checked by name, so it's neither a confirmed warrant/ETF nor
+    # excluded here — it passes through with an unknown market cap, resolved
+    # in the market-cap filter below (assumed qualifying, not excluded).
     quotes = fetch_fmp_quotes(non_suffix_warrants)
 
     clean_symbols, dropped_warrant_name, dropped_etf, lookup_failed = [], [], [], []
@@ -507,6 +510,7 @@ def fetch_alpaca_movers():
         q = quotes.get(sym)
         if q is None:
             lookup_failed.append(sym)
+            clean_symbols.append(sym)
             continue
         name_lower = (q.get("name") or "").lower()
         if "warrant" in name_lower:
@@ -521,7 +525,7 @@ def fetch_alpaca_movers():
     if dropped_etf:
         log(f"Dropped ETF/fund ticker(s): {', '.join(dropped_etf)}", "info")
     if lookup_failed:
-        log(f"{len(lookup_failed)} ticker(s) excluded — FMP profile lookup failed: {', '.join(lookup_failed)}", "warn")
+        log(f"{len(lookup_failed)} ticker(s) have no FMP profile data — market cap assumed >$300M: {', '.join(lookup_failed)}", "warn")
     if not clean_symbols:
         log("Nothing left after warrant/ETF filter", "warn")
         return []
@@ -538,12 +542,21 @@ def fetch_alpaca_movers():
     log(f"{len(candidates)} candidate(s) passed price/change filter: {', '.join(candidates)}", "info")
 
     # ── Market cap filter, reusing the FMP data already fetched above ───────
+    # Missing market cap (lookup failed entirely, or the field came back
+    # empty) is treated as qualifying rather than excluded — the FMP free
+    # tier has enough data gaps that failing closed here was dropping
+    # otherwise-legitimate candidates before they ever reached the real
+    # HVE range/volume check.
     tickers = []
     for sym in candidates:
-        cap = quotes[sym]["market_cap"]
-        log(f"  {sym}: market cap = {cap}", "info")
-        if cap and cap > 300_000_000:
+        cap = (quotes.get(sym) or {}).get("market_cap")
+        if cap is None:
+            log(f"  {sym}: market cap unavailable — assumed qualifying", "info")
             tickers.append(sym)
+        else:
+            log(f"  {sym}: market cap = {cap}", "info")
+            if cap > 300_000_000:
+                tickers.append(sym)
 
     if not tickers:
         log("No Alpaca movers passed the market cap filter", "warn")
