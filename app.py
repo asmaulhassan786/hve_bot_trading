@@ -529,9 +529,15 @@ def fetch_top_gainers(min_change_pct=MOVERS_MIN_CHANGE_PCT):
         for sym, snap in snapshots.items():
             if not isinstance(snap, dict):
                 continue
-            price = (snap.get("latestTrade") or {}).get("p")
+            daily_bar = snap.get("dailyBar") or {}
+            # Prefer the regular-session daily bar's close over the latest
+            # trade: latestTrade can drift to a stray after-hours print once
+            # the session ends, which silently understates (or fakes) the
+            # day's real % change depending on when the scan happens to run.
+            # dailyBar.c stays pinned to the actual regular-session close.
+            price = daily_bar.get("c") or (snap.get("latestTrade") or {}).get("p")
             prev_close = (snap.get("prevDailyBar") or {}).get("c")
-            today_volume = (snap.get("dailyBar") or {}).get("v", 0)
+            today_volume = daily_bar.get("v", 0)
             if not price or not prev_close:
                 continue
             # A single stale/thin extended-hours trade print can make an
