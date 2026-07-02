@@ -615,7 +615,10 @@
     <div class="card">
       <div class="card-header" style="margin-bottom:10px">
         <span class="card-title">Activity log</span>
-        <button class="btn" style="font-size:11px;padding:3px 10px;height:auto" onclick="clearLog()">Clear</button>
+        <span style="display:flex;gap:8px">
+          <button class="btn" style="font-size:11px;padding:3px 10px;height:auto" onclick="copyLog()">Copy</button>
+          <button class="btn" style="font-size:11px;padding:3px 10px;height:auto" onclick="clearLog()">Clear</button>
+        </span>
       </div>
       <div class="log-wrap" id="log-wrap"></div>
     </div>
@@ -994,6 +997,21 @@ async function loadLog() {
   // reverse so oldest is at top, newest at bottom
   logs.slice().reverse().forEach(e => appendLogLine(e));
   wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function copyLog() {
+  try {
+    const r = await fetch('/api/log');
+    const logs = await r.json();
+    if (!logs.length) { showToast('No log entries to copy', 'err'); return; }
+    const text = logs.slice().reverse()
+      .map(e => `${e.date || ''} ${e.time}  [${(e.level || 'info').toUpperCase()}]  ${e.msg}`)
+      .join('\n');
+    await navigator.clipboard.writeText(text);
+    showToast(`Copied ${logs.length} log entries to clipboard`, 'ok');
+  } catch (e) {
+    showToast('Copy failed: ' + e.message, 'err');
+  }
 }
 
 function clearLog() {
