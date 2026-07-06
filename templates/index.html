@@ -785,7 +785,7 @@ function renderPositions() {
       ? `<button class="row-btn" onclick="openEditStop('${p.symbol}', ${p.qty}, ${p.stop.stop_price}, '${p.stop.id}')">Edit stop</button>`
       : `<button class="row-btn warn" onclick="openSetStop('${p.symbol}', ${p.qty}, ${p.entry_price}, ${p.current_price})">Set stop</button>`;
     const closeBtn = `<button class="row-btn warn" onclick="openCloseModal('${p.symbol}', ${p.qty}, ${p.entry_price}, ${p.current_price})">Close</button>`;
-    const actions = `<div style="display:flex;flex-direction:column;gap:4px">${stopBtn}${closeBtn}</div>`;
+    const actions = `<div style="display:flex;flex-direction:row;gap:4px;flex-wrap:wrap">${stopBtn}${closeBtn}</div>`;
 
     return `<tr>
       <td class="sym">${p.symbol}</td>
