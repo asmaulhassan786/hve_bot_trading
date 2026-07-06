@@ -40,6 +40,7 @@ LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
 POSITION_META_FILE  = os.path.join(DATA_DIR, "position_meta.json")
 STOP_FILLS_FILE     = os.path.join(DATA_DIR, "stop_fills_seen.json")
 WATCHLIST_FILE      = os.path.join(DATA_DIR, "watchlist.json")
+WATCHLIST_HIST_FILE = os.path.join(DATA_DIR, "watchlist_history.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -456,6 +457,56 @@ def save_watchlist(wl: dict):
         json.dump(wl, f, indent=2)
 
 
+def load_watchlist_history() -> dict:
+    """Returns {date_str: {symbol: {day0_high, day0_price, atr14, outcome, fill_price}}}"""
+    try:
+        with open(WATCHLIST_HIST_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_watchlist_history(hist: dict):
+    with open(WATCHLIST_HIST_FILE, "w") as f:
+        json.dump(hist, f, indent=2)
+
+
+def record_watchlist_history(date: str, entries: list):
+    """
+    Called from run_scan() when qualified tickers are added to the watchlist.
+    entries = list of scan result dicts (same as qualified list).
+    Each ticker starts with outcome='pending'.
+    Prunes dates older than 7 trading days.
+    """
+    hist = load_watchlist_history()
+    if date not in hist:
+        hist[date] = {}
+    for s in entries:
+        tkr = s["ticker"]
+        hist[date][tkr] = {
+            "day0_high":  round(s["high"], 4),
+            "day0_price": round(s["price"], 4),
+            "atr14":      round(s["atr14"], 4),
+            "outcome":    "pending",
+            "fill_price": None,
+        }
+    # Prune to 7 most-recent dates
+    sorted_dates = sorted(hist.keys(), reverse=True)
+    for old in sorted_dates[7:]:
+        del hist[old]
+    save_watchlist_history(hist)
+
+
+def update_watchlist_outcome(date: str, symbol: str, outcome: str, fill_price: float = None):
+    """outcome: 'bought' | 'expired' | 'skipped'"""
+    hist = load_watchlist_history()
+    if date in hist and symbol in hist[date]:
+        hist[date][symbol]["outcome"] = outcome
+        if fill_price is not None:
+            hist[date][symbol]["fill_price"] = round(fill_price, 4)
+        save_watchlist_history(hist)
+
+
 def get_prev_trading_day(from_date_str: str) -> str:
     """Return the most recent trading day before from_date_str (YYYY-MM-DD)."""
     try:
@@ -563,7 +614,9 @@ def check_breakout_entries():
 
     if stale:
         for sym in stale:
-            log(f"  {sym}: watchlist entry from {stale[sym]['day0_date']} expired (>1 day old) — removed", "warn")
+            d0 = stale[sym].get("day0_date", "")
+            log(f"  {sym}: watchlist entry from {d0} expired (>1 day old) — removed", "warn")
+            update_watchlist_outcome(d0, sym, "expired")
 
     if not actionable:
         if stale:
@@ -578,6 +631,7 @@ def check_breakout_entries():
                 f"${actionable[sym]['day0_high']:.2f} — watchlist entry expired",
                 "warn",
             )
+            update_watchlist_outcome(prev_day, sym, "expired")
         save_watchlist({})
         return
 
@@ -590,6 +644,7 @@ def check_breakout_entries():
     for sym, entry in actionable.items():
         if sym in existing_positions:
             log(f"  {sym}: already in positions — removing from watchlist", "info")
+            update_watchlist_outcome(prev_day, sym, "skipped")
             to_remove.append(sym)
             continue
 
@@ -639,6 +694,7 @@ def check_breakout_entries():
         else:
             log(f"  {sym}: stop placement failed — {stop.get('message', '')}", "error")
 
+        update_watchlist_outcome(prev_day, sym, "bought", fill_price)
         to_remove.append(sym)
 
     # Prune triggered / stale entries
@@ -1004,6 +1060,9 @@ def run_scan(source: str = None):
         )
 
     save_watchlist(watchlist)
+    added_data = [s for s in qualified if s["ticker"] in added]
+    if added_data:
+        record_watchlist_history(today, added_data)
     log(
         f"── Scan complete — {len(added)} ticker(s) on watchlist: {', '.join(added) if added else 'none'} ──\n"
         "   Buy triggers if price breaks above Day 0 high before 11:00 AM ET tomorrow.",
@@ -1109,6 +1168,27 @@ def cron_scan():
     thread = threading.Thread(target=run_scan, args=("alpaca",), daemon=True)
     thread.start()
     return jsonify({"ok": True, "msg": f"Alpaca movers scan started at {now_et}"})
+
+
+@app.route("/api/watchlist/history")
+def get_watchlist_history():
+    hist = load_watchlist_history()
+    # Merge current active watchlist entries as 'pending' for today's date
+    wl = load_watchlist()
+    if wl:
+        for sym, v in wl.items():
+            d = v.get("day0_date", "")
+            if d:
+                hist.setdefault(d, {}).setdefault(sym, {
+                    "day0_high":  v.get("day0_high"),
+                    "day0_price": v.get("day0_price"),
+                    "atr14":      v.get("atr14"),
+                    "outcome":    "pending",
+                    "fill_price": None,
+                })
+    # Return sorted newest-first
+    sorted_hist = dict(sorted(hist.items(), reverse=True))
+    return jsonify(sorted_hist)
 
 
 @app.route("/api/orders/stop", methods=["POST"])

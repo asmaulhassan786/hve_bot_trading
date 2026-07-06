@@ -422,6 +422,33 @@
   button.btn.primary:hover { background: #0c4479; }
   button.btn.danger  { background: var(--red-bg); color: var(--red); border-color: #f09595; }
 
+  /* ── Watchlist history ── */
+  .wh-day { margin-bottom: 12px; }
+  .wh-day:last-child { margin-bottom: 0; }
+  .wh-date-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 7px;
+  }
+  .wh-date {
+    font-size: 12px; font-weight: 600; color: var(--text2);
+    min-width: 80px;
+  }
+  .wh-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .wh-chip {
+    display: flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 500;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    border: 0.5px solid var(--border);
+  }
+  .wh-chip.pending  { background: var(--amber-bg);  color: var(--amber);  border-color: #e8c97a; }
+  .wh-chip.bought   { background: var(--green-bg);  color: var(--green);  border-color: #b0d87b; }
+  .wh-chip.expired  { background: var(--bg2);       color: var(--text3);  border-color: var(--border2); }
+  .wh-chip.skipped  { background: var(--blue-bg);   color: var(--blue);   border-color: #b5d4f4; }
+  .wh-chip .wh-dot  { font-size: 9px; }
+  .wh-chip .wh-sub  { font-size: 10px; opacity: 0.75; }
+  .wh-empty { font-size: 12px; color: var(--text3); padding: 20px 0; text-align: center; }
+
   /* ── Close modal preview ── */
   .close-preview {
     background: var(--bg2);
@@ -597,6 +624,17 @@
     </div>
   </div>
 
+  <!-- Watchlist History -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">Watchlist History</span>
+      <span style="font-size:11px;color:var(--text3)">Last 7 trading days · Day 0 qualified tickers</span>
+    </div>
+    <div id="watchlist-history-wrap">
+      <div class="wh-empty">Loading…</div>
+    </div>
+  </div>
+
   <!-- Controls + Log -->
   <div class="bottom-grid">
 
@@ -717,14 +755,14 @@ let countdownTimer = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  await Promise.all([loadTickers(), syncPositions(), loadAccount(), loadLog()]);
+  await Promise.all([loadTickers(), syncPositions(), loadAccount(), loadLog(), loadWatchlistHistory()]);
   startCountdown();
   setInterval(autoRefresh, 60000);
   setInterval(loadLog, 15000);
 }
 
 async function autoRefresh() {
-  await Promise.all([syncPositions(), loadAccount()]);
+  await Promise.all([syncPositions(), loadAccount(), loadWatchlistHistory()]);
 }
 
 function startCountdown() {
@@ -1030,6 +1068,48 @@ async function confirmCloseAll() {
   }
   showToast('Market sell orders placed', 'ok');
   setTimeout(syncPositions, 2000);
+}
+
+// ── Watchlist History ─────────────────────────────────────────────────────────
+async function loadWatchlistHistory() {
+  const r    = await fetch('/api/watchlist/history');
+  const hist = await r.json();
+  const wrap = document.getElementById('watchlist-history-wrap');
+  const dates = Object.keys(hist);
+  if (!dates.length) {
+    wrap.innerHTML = '<div class="wh-empty">No watchlist history yet — history builds after the first scan.</div>';
+    return;
+  }
+
+  const outcomeIcon  = { pending: '◉', bought: '✓', expired: '✗', skipped: '→' };
+  const outcomeLabel = { pending: 'Pending', bought: 'Bought', expired: 'Expired', skipped: 'Skipped' };
+
+  wrap.innerHTML = dates.map(date => {
+    const isToday = date === new Date().toLocaleDateString('en-CA');
+    const label   = isToday ? `${fmtHistDate(date)} <span style="font-size:10px;color:var(--amber)">(today)</span>` : fmtHistDate(date);
+    const tickers = hist[date];
+    const chips   = Object.entries(tickers).map(([sym, v]) => {
+      const oc  = v.outcome || 'pending';
+      const sub = oc === 'bought' && v.fill_price ? ` @ $${parseFloat(v.fill_price).toFixed(2)}` : ` $${parseFloat(v.day0_high).toFixed(2)}H`;
+      return `<div class="wh-chip ${oc}" title="Day 0 high: $${parseFloat(v.day0_high).toFixed(2)}  ATR14: ${parseFloat(v.atr14||0).toFixed(2)}">
+        <span class="wh-dot">${outcomeIcon[oc]}</span>
+        <span>${sym}</span>
+        <span class="wh-sub">${outcomeLabel[oc]}${sub}</span>
+      </div>`;
+    }).join('');
+    return `<div class="wh-day">
+      <div class="wh-date-row">
+        <span class="wh-date">${label}</span>
+        <span style="font-size:11px;color:var(--text3)">${Object.keys(tickers).length} ticker${Object.keys(tickers).length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="wh-chips">${chips}</div>
+    </div>`;
+  }).join('<hr style="border:none;border-top:0.5px solid var(--border);margin:12px 0">');
+}
+
+function fmtHistDate(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 // ── Close position ────────────────────────────────────────────────────────────
