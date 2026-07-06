@@ -39,6 +39,7 @@ TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
 LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
 POSITION_META_FILE  = os.path.join(DATA_DIR, "position_meta.json")
 STOP_FILLS_FILE     = os.path.join(DATA_DIR, "stop_fills_seen.json")
+WATCHLIST_FILE      = os.path.join(DATA_DIR, "watchlist.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -438,6 +439,46 @@ def save_stop_fills_seen(seen: set):
         json.dump(list(seen), f)
 
 
+def load_watchlist() -> dict:
+    """
+    Returns {symbol: {day0_high, day0_date, atr14, price}} for stocks
+    that qualified on Day 0 and are pending a next-day breakout buy.
+    """
+    try:
+        with open(WATCHLIST_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_watchlist(wl: dict):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(wl, f, indent=2)
+
+
+def get_prev_trading_day(from_date_str: str) -> str:
+    """Return the most recent trading day before from_date_str (YYYY-MM-DD)."""
+    try:
+        from_dt = datetime.strptime(from_date_str, "%Y-%m-%d")
+        look_back = (from_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+        r = requests.get(
+            f"{ALPACA_BASE_URL}/calendar",
+            params={"start": look_back, "end": from_date_str},
+            headers=alpaca_headers(), timeout=10,
+        )
+        calendar = r.json()
+        if isinstance(calendar, list):
+            trading_days = [c["date"] for c in calendar if c["date"] < from_date_str]
+            if trading_days:
+                return trading_days[-1]
+    except Exception:
+        pass
+    # fallback: last weekday
+    from_dt = datetime.strptime(from_date_str, "%Y-%m-%d")
+    delta = 1 if from_dt.weekday() != 0 else 3
+    return (from_dt - timedelta(days=delta)).strftime("%Y-%m-%d")
+
+
 def check_stop_fills():
     """
     Polls Alpaca's recently closed orders every 2 minutes for filled stop/stop_limit
@@ -492,6 +533,119 @@ def check_stop_fills():
 
     except Exception as e:
         log(f"check_stop_fills error: {e}", "error")
+
+
+def check_breakout_entries():
+    """
+    Runs every minute from 9:30–11:00 AM ET on trading days.
+    For each watchlist entry whose day0_date was the previous trading day,
+    checks if current price has broken above the Day 0 high.
+    Buys on breakout; expires any remaining entries at 11:00 AM.
+    """
+    now = datetime.now(ET)
+
+    # Only run on trading days, market hours up to 11:00 AM
+    if now.weekday() >= 5:
+        return
+    if not ((9, 30) <= (now.hour, now.minute) <= (11, 0)):
+        return
+
+    watchlist = load_watchlist()
+    if not watchlist:
+        return
+
+    today     = now.strftime("%Y-%m-%d")
+    prev_day  = get_prev_trading_day(today)
+
+    # Separate entries that belong to yesterday (actionable) vs older (stale)
+    actionable = {sym: v for sym, v in watchlist.items() if v.get("day0_date") == prev_day}
+    stale      = {sym: v for sym, v in watchlist.items() if v.get("day0_date") != prev_day}
+
+    if stale:
+        for sym in stale:
+            log(f"  {sym}: watchlist entry from {stale[sym]['day0_date']} expired (>1 day old) — removed", "warn")
+
+    if not actionable:
+        if stale:
+            save_watchlist({})
+        return
+
+    # At or after 11:00 AM — expire everything that hasn't triggered
+    if now.hour >= 11:
+        for sym in actionable:
+            log(
+                f"  {sym}: 11:00 AM ET passed — no breakout above Day 0 high "
+                f"${actionable[sym]['day0_high']:.2f} — watchlist entry expired",
+                "warn",
+            )
+        save_watchlist({})
+        return
+
+    data      = load_tickers()
+    buy_amount = data.get("buy_amount", DEFAULT_BUY_AMOUNT)
+    existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
+    position_meta = load_position_meta()
+    to_remove = list(stale.keys())
+
+    for sym, entry in actionable.items():
+        if sym in existing_positions:
+            log(f"  {sym}: already in positions — removing from watchlist", "info")
+            to_remove.append(sym)
+            continue
+
+        day0_high = entry["day0_high"]
+        current   = get_latest_trade_price(sym)
+        if current <= 0:
+            log(f"  {sym}: price unavailable, skipping this check", "warn")
+            continue
+
+        if current <= day0_high:
+            continue  # no breakout yet — check again next minute
+
+        # Breakout confirmed
+        log(
+            f"  {sym}: BREAKOUT — current ${current:.2f} > Day 0 high ${day0_high:.2f} "
+            f"at {now.strftime('%H:%M')} ET — placing buy order",
+            "ok",
+        )
+
+        qty = math.ceil(buy_amount / current)
+        buy = place_buy_order(sym, qty)
+        order_id = buy.get("id")
+        if not order_id:
+            log(f"  {sym}: buy order failed — {buy.get('message', 'unknown error')}", "error")
+            to_remove.append(sym)
+            continue
+
+        log(f"  {sym}: buy order placed — waiting for fill…", "info")
+        filled = wait_for_fill(order_id)
+        if filled is None:
+            log(f"  {sym}: fill timeout or rejected", "error")
+            to_remove.append(sym)
+            continue
+
+        fill_price = float(filled["filled_avg_price"])
+        fill_qty   = float(filled["filled_qty"])
+        atr        = entry["atr14"]
+        stop_price = round(fill_price - ATR_STOP_MULT * atr, 2)
+
+        log(f"  {sym}: filled @ ${fill_price:.2f}  qty={int(fill_qty)}  ATR14=${atr:.2f}", "ok")
+
+        stop = place_stop_order_internal(sym, fill_qty, stop_price)
+        if stop.get("id"):
+            log(f"  {sym}: stop-loss placed @ ${stop_price:.2f} ({ATR_STOP_MULT}x ATR below entry)", "ok")
+            position_meta[sym] = {"entry_atr": atr, "entry_price": fill_price, "breakeven_triggered": False}
+            save_position_meta(position_meta)
+        else:
+            log(f"  {sym}: stop placement failed — {stop.get('message', '')}", "error")
+
+        to_remove.append(sym)
+
+    # Prune triggered / stale entries
+    if to_remove:
+        for sym in to_remove:
+            watchlist.pop(sym, None)
+        save_watchlist(watchlist)
 
 
 def fetch_fmp_quotes(symbols: list) -> dict:
@@ -823,55 +977,38 @@ def run_scan(source: str = None):
     )
 
     if not qualified:
-        log("No stocks met all HVE criteria — no orders placed", "warn")
+        log("No stocks met all HVE criteria — watchlist unchanged", "warn")
         return
 
-    # ── Place buy orders ──────────────────────────────────────────────────────
-    buy_amount = data.get("buy_amount", DEFAULT_BUY_AMOUNT)
-    log(f"Placing ~${buy_amount} buy orders (whole shares, rounded up) for qualified stocks…", "info")
+    # ── Save to watchlist for next-day breakout entry ─────────────────────────
+    # Strategy: buy on Day 1 only if price breaks above Day 0 high before 11 AM ET.
     existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
-    position_meta = load_position_meta()
+    watchlist = load_watchlist()
 
+    added = []
     for s in qualified:
         tkr = s["ticker"]
         if tkr in existing_positions:
-            log(f"  {tkr}: already in positions — skipping buy", "info")
+            log(f"  {tkr}: already in positions — not added to watchlist", "info")
             continue
+        watchlist[tkr] = {
+            "day0_date":  today,
+            "day0_high":  round(s["high"], 4),
+            "atr14":      round(s["atr14"], 4),
+            "day0_price": round(s["price"], 4),
+        }
+        added.append(tkr)
+        log(
+            f"  {tkr}: added to next-day watchlist — Day 0 high ${s['high']:.2f}  ATR14=${s['atr14']:.2f}",
+            "ok",
+        )
 
-        if s["price"] <= 0:
-            log(f"  {tkr}: invalid price {s['price']} — skipping buy", "error")
-            continue
-        qty = math.ceil(buy_amount / s["price"])
-
-        buy      = place_buy_order(tkr, qty)
-        order_id = buy.get("id")
-        if not order_id:
-            log(f"  {tkr}: buy order failed — {buy.get('message', 'unknown error')}", "error")
-            continue
-
-        log(f"  {tkr}: buy order placed — waiting for fill…", "info")
-        filled = wait_for_fill(order_id)
-
-        if filled is None:
-            log(f"  {tkr}: fill timeout or rejected", "error")
-            continue
-
-        entry_price = float(filled["filled_avg_price"])
-        qty         = float(filled["filled_qty"])
-        atr         = s["atr14"]
-        stop_price  = round(entry_price - ATR_STOP_MULT * atr, 2)
-
-        log(f"  {tkr}: filled @ ${entry_price:.2f}  qty={int(qty)}  ATR14=${atr:.2f}", "ok")
-
-        stop = place_stop_order_internal(tkr, qty, stop_price)
-        if stop.get("id"):
-            log(f"  {tkr}: stop-loss placed @ ${stop_price:.2f} ({ATR_STOP_MULT}x ATR below entry)", "ok")
-            position_meta[tkr] = {"entry_atr": atr, "entry_price": entry_price, "breakeven_triggered": False}
-            save_position_meta(position_meta)
-        else:
-            log(f"  {tkr}: stop placement failed — {stop.get('message', '')}", "error")
-
-    log("── Scan complete ──", "ok")
+    save_watchlist(watchlist)
+    log(
+        f"── Scan complete — {len(added)} ticker(s) on watchlist: {', '.join(added) if added else 'none'} ──\n"
+        "   Buy triggers if price breaks above Day 0 high before 11:00 AM ET tomorrow.",
+        "ok",
+    )
 
 
 # ── Scheduler setup ───────────────────────────────────────────────────────────
@@ -1048,6 +1185,12 @@ def boot():
         check_stop_fills, "interval",
         minutes=2,
         id="stop_fill_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_breakout_entries, "interval",
+        minutes=1,
+        id="breakout_entry_check",
         replace_existing=True,
     )
     if not scheduler.running:
