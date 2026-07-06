@@ -682,6 +682,16 @@
     </div>
     <label>Qty to close</label>
     <input type="number" id="close-qty" step="0.0001" min="0.0001" placeholder="0" oninput="updateClosePreview()" />
+    <label>Reason for closing</label>
+    <select id="close-reason" style="width:100%;height:36px;border:0.5px solid var(--border2);border-radius:var(--radius);padding:0 12px;font-size:13px;background:var(--bg);color:var(--text);margin-bottom:16px;outline:none;">
+      <option value="Target reached">Target reached</option>
+      <option value="Stop missed — closing manually">Stop missed — closing manually</option>
+      <option value="Cutting losses">Cutting losses</option>
+      <option value="Partial profit taking">Partial profit taking</option>
+      <option value="End of day exit">End of day exit</option>
+      <option value="Risk management">Risk management</option>
+      <option value="Other">Other</option>
+    </select>
     <div class="modal-btns">
       <button class="btn" onclick="closeCloseModal()">Cancel</button>
       <button class="btn danger" onclick="submitClose()">Close position</button>
@@ -1060,9 +1070,12 @@ async function submitClose() {
   if (!qty || qty <= 0)          { showToast('Enter a valid quantity', 'err'); return; }
   if (!closeCtx)                 return;
   if (qty > closeCtx.qty + 0.0001) { showToast('Qty exceeds position size', 'err'); return; }
-  const sym = closeCtx.symbol;
+  const sym    = closeCtx.symbol;
+  const reason = document.getElementById('close-reason').value;
+  const pl     = qty * (closeCtx.current - closeCtx.entry);
+  const plSign = pl >= 0 ? '+' : '';
   closeCloseModal();
-  addLog(`Closing ${qty} share(s) of ${sym}…`, 'warn');
+  addLog(`CLOSE ${sym} — ${qty} share(s) | Reason: ${reason} | Est. P&L: ${plSign}$${Math.abs(pl).toFixed(2)}`, 'warn');
   const r = await fetch('/api/orders/sell', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1071,6 +1084,7 @@ async function submitClose() {
   const d = await r.json();
   if (d.ok) {
     showToast(`Market sell placed for ${sym}`, 'ok');
+    addLog(`${sym}: market sell order submitted successfully`, 'ok');
     setTimeout(syncPositions, 2000);
   } else {
     showToast(d.error || 'Close failed', 'err');
