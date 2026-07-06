@@ -37,7 +37,8 @@ FMP_API_KEY     = os.environ.get("FMP_API_KEY", "")    # financialmodelingprep.c
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
 LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
-POSITION_META_FILE = os.path.join(DATA_DIR, "position_meta.json")
+POSITION_META_FILE  = os.path.join(DATA_DIR, "position_meta.json")
+STOP_FILLS_FILE     = os.path.join(DATA_DIR, "stop_fills_seen.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -424,6 +425,75 @@ def check_breakeven_stops():
         save_position_meta(meta)
 
 
+def load_stop_fills_seen() -> set:
+    try:
+        with open(STOP_FILLS_FILE) as f:
+            return set(json.load(f))
+    except FileNotFoundError:
+        return set()
+
+
+def save_stop_fills_seen(seen: set):
+    with open(STOP_FILLS_FILE, "w") as f:
+        json.dump(list(seen), f)
+
+
+def check_stop_fills():
+    """
+    Polls Alpaca's recently closed orders every 2 minutes for filled stop/stop_limit
+    sell orders. Any new fill not yet logged is written to the activity log with
+    symbol, qty, fill price, and estimated P&L vs entry.
+    """
+    try:
+        # Fetch orders closed in last 24 hours
+        since = (datetime.now(ET) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        orders = alpaca_get(f"/orders?status=closed&limit=100&after={since}")
+        if not isinstance(orders, list):
+            return
+
+        seen = load_stop_fills_seen()
+        changed = False
+
+        for o in orders:
+            if o.get("id") in seen:
+                continue
+            if o.get("type") not in ("stop", "stop_limit"):
+                continue
+            if o.get("side") != "sell":
+                continue
+            if o.get("status") != "filled":
+                continue
+
+            sym        = o.get("symbol", "?")
+            qty        = float(o.get("filled_qty") or o.get("qty") or 0)
+            fill_price = float(o.get("filled_avg_price") or o.get("stop_price") or 0)
+            stop_price = float(o.get("stop_price") or 0)
+
+            # Estimate P&L from position meta if available; otherwise omit
+            meta  = load_position_meta()
+            entry = float(meta.get(sym, {}).get("entry_price", 0))
+            pl_str = ""
+            if entry and fill_price:
+                pl     = (fill_price - entry) * qty
+                pl_sign = "+" if pl >= 0 else ""
+                pl_str  = f" | P&L: {pl_sign}${abs(pl):.2f}"
+
+            log(
+                f"STOP HIT (auto) — {sym}: {qty} share(s) filled @ ${fill_price:.2f}"
+                f" (stop was ${stop_price:.2f}){pl_str} | Trigger: stop order executed by Alpaca",
+                "warn",
+            )
+
+            seen.add(o["id"])
+            changed = True
+
+        if changed:
+            save_stop_fills_seen(seen)
+
+    except Exception as e:
+        log(f"check_stop_fills error: {e}", "error")
+
+
 def fetch_fmp_quotes(symbols: list) -> dict:
     """
     Company profile lookup via Financial Modeling Prep. Returns
@@ -796,7 +866,7 @@ def run_scan(source: str = None):
         stop = place_stop_order_internal(tkr, qty, stop_price)
         if stop.get("id"):
             log(f"  {tkr}: stop-loss placed @ ${stop_price:.2f} ({ATR_STOP_MULT}x ATR below entry)", "ok")
-            position_meta[tkr] = {"entry_atr": atr, "breakeven_triggered": False}
+            position_meta[tkr] = {"entry_atr": atr, "entry_price": entry_price, "breakeven_triggered": False}
             save_position_meta(position_meta)
         else:
             log(f"  {tkr}: stop placement failed — {stop.get('message', '')}", "error")
@@ -913,6 +983,15 @@ def place_stop():
     result = place_stop_order_internal(ticker, qty, stop_price)
     if result.get("id"):
         log(f"{ticker}: stop order placed @ ${stop_price:.2f}", "ok")
+        # persist entry price so check_stop_fills can compute P&L later
+        positions_raw = alpaca_get("/positions")
+        if isinstance(positions_raw, list):
+            for p in positions_raw:
+                if p["symbol"] == ticker:
+                    meta = load_position_meta()
+                    meta.setdefault(ticker, {})["entry_price"] = float(p["avg_entry_price"])
+                    save_position_meta(meta)
+                    break
         return jsonify({"ok": True, "order": result})
     else:
         msg = result.get("message", "unknown error")
@@ -963,6 +1042,12 @@ def boot():
         check_breakeven_stops, "interval",
         minutes=BREAKEVEN_POLL_MIN,
         id="breakeven_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        check_stop_fills, "interval",
+        minutes=2,
+        id="stop_fill_check",
         replace_existing=True,
     )
     if not scheduler.running:
