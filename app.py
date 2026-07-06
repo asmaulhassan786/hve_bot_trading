@@ -927,7 +927,7 @@ def market_sell():
     qty    = data["qty"]
     payload = {
         "symbol":        ticker,
-        "qty":           str(int(float(qty))),
+        "qty":           str(round(float(qty), 4)),
         "side":          "sell",
         "type":          "market",
         "time_in_force": "day",

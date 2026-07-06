@@ -422,6 +422,25 @@
   button.btn.primary:hover { background: #0c4479; }
   button.btn.danger  { background: var(--red-bg); color: var(--red); border-color: #f09595; }
 
+  /* ── Close modal preview ── */
+  .close-preview {
+    background: var(--bg2);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .close-preview-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+  }
+  .close-preview-row .label { color: var(--text2); }
+  .close-preview-row .value { font-weight: 500; }
+
   /* ── Footer ── */
   .footer {
     text-align: center;
@@ -568,7 +587,7 @@
             <th style="width:10%">Stop price</th>
             <th style="width:13%">Stop type</th>
             <th style="width:10%">Stop status</th>
-            <th style="width:8%">Actions</th>
+            <th style="width:12%">Actions</th>
           </tr>
         </thead>
         <tbody id="positions-tbody">
@@ -638,6 +657,34 @@
     <div class="modal-btns">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn primary" onclick="submitStop()">Place stop order</button>
+    </div>
+  </div>
+</div>
+
+<!-- Close position modal -->
+<div class="modal-overlay" id="close-modal" style="display:none">
+  <div class="modal">
+    <h3 id="close-modal-title">Close position</h3>
+    <p id="close-modal-info"></p>
+    <div class="close-preview">
+      <div class="close-preview-row">
+        <span class="label">Qty to close</span>
+        <span class="value" id="close-preview-qty">—</span>
+      </div>
+      <div class="close-preview-row">
+        <span class="label">Est. proceeds</span>
+        <span class="value" id="close-proceeds">—</span>
+      </div>
+      <div class="close-preview-row">
+        <span class="label">Est. P&amp;L</span>
+        <span class="value" id="close-pnl">—</span>
+      </div>
+    </div>
+    <label>Qty to close</label>
+    <input type="number" id="close-qty" step="0.0001" min="0.0001" placeholder="0" oninput="updateClosePreview()" />
+    <div class="modal-btns">
+      <button class="btn" onclick="closeCloseModal()">Cancel</button>
+      <button class="btn danger" onclick="submitClose()">Close position</button>
     </div>
   </div>
 </div>
@@ -734,9 +781,11 @@ function renderPositions() {
       : `<span class="stop-badge stop-missing">No stop</span>`;
     const stopPrice = p.stop ? '$' + parseFloat(p.stop.stop_price).toFixed(2) : '—';
     const stopLabel = p.stop_label || '—';
-    const actions = p.stop
+    const stopBtn = p.stop
       ? `<button class="row-btn" onclick="openEditStop('${p.symbol}', ${p.qty}, ${p.stop.stop_price}, '${p.stop.id}')">Edit stop</button>`
       : `<button class="row-btn warn" onclick="openSetStop('${p.symbol}', ${p.qty}, ${p.entry_price}, ${p.current_price})">Set stop</button>`;
+    const closeBtn = `<button class="row-btn warn" onclick="openCloseModal('${p.symbol}', ${p.qty}, ${p.entry_price}, ${p.current_price})">Close</button>`;
+    const actions = `<div style="display:flex;flex-direction:column;gap:4px">${stopBtn}${closeBtn}</div>`;
 
     return `<tr>
       <td class="sym">${p.symbol}</td>
@@ -971,6 +1020,62 @@ async function confirmCloseAll() {
   }
   showToast('Market sell orders placed', 'ok');
   setTimeout(syncPositions, 2000);
+}
+
+// ── Close position ────────────────────────────────────────────────────────────
+let closeCtx = null;
+
+function openCloseModal(symbol, qty, entry, current) {
+  closeCtx = { symbol, qty, entry, current };
+  document.getElementById('close-modal-title').textContent = `Close position — ${symbol}`;
+  document.getElementById('close-modal-info').textContent =
+    `Entry: $${entry.toFixed(2)}  ·  Current: $${current.toFixed(2)}  ·  Total qty: ${qty.toFixed(4)}`;
+  const qtyInput = document.getElementById('close-qty');
+  qtyInput.max   = qty;
+  qtyInput.value = qty.toFixed(4);
+  updateClosePreview();
+  document.getElementById('close-modal').style.display = 'flex';
+}
+
+function updateClosePreview() {
+  if (!closeCtx) return;
+  const qty      = parseFloat(document.getElementById('close-qty').value) || 0;
+  const proceeds = qty * closeCtx.current;
+  const pl       = qty * (closeCtx.current - closeCtx.entry);
+  const plSign   = pl >= 0 ? '+' : '';
+  const plClass  = pl >= 0 ? 'green-text' : 'red-text';
+  document.getElementById('close-preview-qty').textContent = qty.toFixed(4) + ' shares';
+  document.getElementById('close-proceeds').textContent    = '$' + proceeds.toFixed(2);
+  document.getElementById('close-pnl').innerHTML =
+    `<span class="${plClass}">${plSign}$${Math.abs(pl).toFixed(2)}</span>`;
+}
+
+function closeCloseModal() {
+  document.getElementById('close-modal').style.display = 'none';
+  closeCtx = null;
+}
+
+async function submitClose() {
+  const qty = parseFloat(document.getElementById('close-qty').value);
+  if (!qty || qty <= 0)          { showToast('Enter a valid quantity', 'err'); return; }
+  if (!closeCtx)                 return;
+  if (qty > closeCtx.qty + 0.0001) { showToast('Qty exceeds position size', 'err'); return; }
+  const sym = closeCtx.symbol;
+  closeCloseModal();
+  addLog(`Closing ${qty} share(s) of ${sym}…`, 'warn');
+  const r = await fetch('/api/orders/sell', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: sym, qty }),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast(`Market sell placed for ${sym}`, 'ok');
+    setTimeout(syncPositions, 2000);
+  } else {
+    showToast(d.error || 'Close failed', 'err');
+    addLog(`${sym}: close failed — ${d.error}`, 'error');
+  }
 }
 
 // ── Log ───────────────────────────────────────────────────────────────────────
