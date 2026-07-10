@@ -34,6 +34,10 @@ ALPACA_SECRET   = os.environ.get("ALPACA_SECRET", "")
 CRON_SECRET     = os.environ.get("CRON_SECRET", "")   # set this in Render env vars
 FMP_API_KEY     = os.environ.get("FMP_API_KEY", "")    # financialmodelingprep.com key — market cap lookups
 
+UPSTASH_REDIS_REST_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+USE_REDIS = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
+
 DATA_DIR     = os.path.join(os.path.dirname(__file__), "data")
 TICKERS_FILE = os.path.join(DATA_DIR, "tickers.json")
 LOG_FILE     = os.path.join(DATA_DIR, "activity.json")
@@ -43,6 +47,63 @@ WATCHLIST_FILE      = os.path.join(DATA_DIR, "watchlist.json")
 WATCHLIST_HIST_FILE = os.path.join(DATA_DIR, "watchlist_history.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+
+# ── Persistent key/value store ───────────────────────────────────────────────
+# Render's free web service tier has no persistent disk — the container's local
+# filesystem (including DATA_DIR) is wiped on every restart/redeploy/idle spin-down.
+# When Upstash Redis credentials are set, all state below is stored there instead
+# so it survives regardless of instance type or restarts. Falls back to the local
+# JSON files (previous behavior) when the env vars are absent, e.g. for local dev.
+
+def _redis_get(key: str):
+    r = requests.get(
+        f"{UPSTASH_REDIS_REST_URL}/get/{key}",
+        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    result = r.json().get("result")
+    return json.loads(result) if result is not None else None
+
+
+def _redis_set(key: str, value):
+    r = requests.post(
+        f"{UPSTASH_REDIS_REST_URL}/set/{key}",
+        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+        data=json.dumps(value),
+        timeout=10,
+    )
+    r.raise_for_status()
+
+
+def kv_load(key: str, file_path: str, default):
+    """Load a JSON-serializable value, preferring Redis when configured."""
+    if USE_REDIS:
+        try:
+            value = _redis_get(key)
+            return value if value is not None else default
+        except Exception as e:
+            print(f"kv_load({key}) redis error, falling back to default: {e}")
+            return default
+    try:
+        with open(file_path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+
+
+def kv_save(key: str, file_path: str, value):
+    """Save a JSON-serializable value, preferring Redis when configured."""
+    if USE_REDIS:
+        try:
+            _redis_set(key, value)
+            return
+        except Exception as e:
+            print(f"kv_save({key}) redis error, data not persisted: {e}")
+            return
+    with open(file_path, "w") as f:
+        json.dump(value, f, indent=2)
 
 DEFAULT_BUY_AMOUNT = 500   # used when no buy_amount is saved yet; user-configurable via UI
 MOVERS_MIN_PRICE    = 7    # minimum price for an Alpaca mover to be HVE-eligible
@@ -70,25 +131,20 @@ def log(msg: str, level: str = "info"):
     with _log_lock:
         activity_log.appendleft(entry)
     try:
-        existing = []
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE) as f:
-                existing = json.load(f)
+        existing = kv_load("activity_log", LOG_FILE, [])
         existing.insert(0, entry)
         # Retain by calendar day (covers ~10 trading days), not a fixed count,
         # so the timeline survives restarts/redeploys instead of resetting.
         cutoff = (now - timedelta(days=LOG_RETENTION_DAYS)).strftime("%Y-%m-%d")
         existing = [e for e in existing if e.get("date", "") >= cutoff][:LOG_MAX_ENTRIES]
-        with open(LOG_FILE, "w") as f:
-            json.dump(existing, f)
+        kv_save("activity_log", LOG_FILE, existing)
     except Exception:
         pass
 
 
 def load_log():
     try:
-        with open(LOG_FILE) as f:
-            return json.load(f)
+        return kv_load("activity_log", LOG_FILE, list(activity_log))
     except Exception:
         return list(activity_log)
 
@@ -123,16 +179,12 @@ def alpaca_delete(path):
 # ── Ticker storage ────────────────────────────────────────────────────────────
 
 def load_tickers() -> dict:
-    try:
-        with open(TICKERS_FILE) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"tickers": [], "schedule": "15:50", "mode": "automated", "buy_amount": DEFAULT_BUY_AMOUNT}
+    default = {"tickers": [], "schedule": "15:50", "mode": "automated", "buy_amount": DEFAULT_BUY_AMOUNT}
+    return kv_load("tickers", TICKERS_FILE, default)
 
 
 def save_tickers(data: dict):
-    with open(TICKERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    kv_save("tickers", TICKERS_FILE, data)
 
 
 # ── Position metadata (entry ATR, breakeven state) ──────────────────────────────
@@ -140,16 +192,11 @@ def save_tickers(data: dict):
 # tracks per-symbol {"entry_atr": ..., "breakeven_triggered": ...} locally.
 
 def load_position_meta() -> dict:
-    try:
-        with open(POSITION_META_FILE) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return kv_load("position_meta", POSITION_META_FILE, {})
 
 
 def save_position_meta(meta: dict):
-    with open(POSITION_META_FILE, "w") as f:
-        json.dump(meta, f, indent=2)
+    kv_save("position_meta", POSITION_META_FILE, meta)
 
 
 # ── Position + stop merge ─────────────────────────────────────────────────────
@@ -428,16 +475,11 @@ def check_breakeven_stops():
 
 
 def load_stop_fills_seen() -> set:
-    try:
-        with open(STOP_FILLS_FILE) as f:
-            return set(json.load(f))
-    except FileNotFoundError:
-        return set()
+    return set(kv_load("stop_fills_seen", STOP_FILLS_FILE, []))
 
 
 def save_stop_fills_seen(seen: set):
-    with open(STOP_FILLS_FILE, "w") as f:
-        json.dump(list(seen), f)
+    kv_save("stop_fills_seen", STOP_FILLS_FILE, list(seen))
 
 
 def load_watchlist() -> dict:
@@ -445,30 +487,20 @@ def load_watchlist() -> dict:
     Returns {symbol: {day0_high, day0_date, atr14, price}} for stocks
     that qualified on Day 0 and are pending a next-day breakout buy.
     """
-    try:
-        with open(WATCHLIST_FILE) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return kv_load("watchlist", WATCHLIST_FILE, {})
 
 
 def save_watchlist(wl: dict):
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(wl, f, indent=2)
+    kv_save("watchlist", WATCHLIST_FILE, wl)
 
 
 def load_watchlist_history() -> dict:
     """Returns {date_str: {symbol: {day0_high, day0_price, atr14, outcome, fill_price}}}"""
-    try:
-        with open(WATCHLIST_HIST_FILE) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+    return kv_load("watchlist_history", WATCHLIST_HIST_FILE, {})
 
 
 def save_watchlist_history(hist: dict):
-    with open(WATCHLIST_HIST_FILE, "w") as f:
-        json.dump(hist, f, indent=2)
+    kv_save("watchlist_history", WATCHLIST_HIST_FILE, hist)
 
 
 def record_watchlist_history(date: str, entries: list):
