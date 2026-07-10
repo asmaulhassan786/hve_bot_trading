@@ -447,6 +447,13 @@
   .wh-chip.skipped  { background: var(--blue-bg);   color: var(--blue);   border-color: #b5d4f4; }
   .wh-chip .wh-dot  { font-size: 9px; }
   .wh-chip .wh-sub  { font-size: 10px; opacity: 0.75; }
+  .wh-manual-tag {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; margin-left: 4px;
+    font-size: 9px; font-weight: 700;
+    border-radius: 50%;
+    background: var(--blue); color: #fff;
+  }
   .wh-empty { font-size: 12px; color: var(--text3); padding: 20px 0; text-align: center; }
 
   /* ── Close modal preview ── */
@@ -629,6 +636,11 @@
     <div class="card-header">
       <span class="card-title">Watchlist History</span>
       <span style="font-size:11px;color:var(--text3)">Last 7 trading days · Day 0 qualified tickers</span>
+    </div>
+    <div class="ticker-input-row" style="margin-bottom:12px">
+      <input type="text" id="wh-add-input" placeholder="Add ticker already qualified yesterday (e.g. NVDA)" maxlength="10"
+             onkeydown="if(event.key==='Enter') addToWatchlistManual()" />
+      <button class="btn" id="wh-add-btn" onclick="addToWatchlistManual()">+ Add</button>
     </div>
     <div id="watchlist-history-wrap">
       <div class="wh-empty">Loading…</div>
@@ -1091,9 +1103,10 @@ async function loadWatchlistHistory() {
     const chips   = Object.entries(tickers).map(([sym, v]) => {
       const oc  = v.outcome || 'pending';
       const sub = oc === 'bought' && v.fill_price ? ` @ $${parseFloat(v.fill_price).toFixed(2)}` : ` $${parseFloat(v.day0_high).toFixed(2)}H`;
-      return `<div class="wh-chip ${oc}" title="Day 0 high: $${parseFloat(v.day0_high).toFixed(2)}  ATR14: ${parseFloat(v.atr14||0).toFixed(2)}">
+      const tag = v.manual ? ' · manually added' : '';
+      return `<div class="wh-chip ${oc}" title="Day 0 high: $${parseFloat(v.day0_high).toFixed(2)}  ATR14: ${parseFloat(v.atr14||0).toFixed(2)}${tag}">
         <span class="wh-dot">${outcomeIcon[oc]}</span>
-        <span>${sym}</span>
+        <span>${sym}${v.manual ? '<span class="wh-manual-tag" title="Manually added">M</span>' : ''}</span>
         <span class="wh-sub">${outcomeLabel[oc]}${sub}</span>
       </div>`;
     }).join('');
@@ -1105,6 +1118,33 @@ async function loadWatchlistHistory() {
       <div class="wh-chips">${chips}</div>
     </div>`;
   }).join('<hr style="border:none;border-top:0.5px solid var(--border);margin:12px 0">');
+}
+
+async function addToWatchlistManual() {
+  const input = document.getElementById('wh-add-input');
+  const btn   = document.getElementById('wh-add-btn');
+  const val   = input.value.trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (!val) return;
+
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/watchlist/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: val }),
+    });
+    const d = await r.json();
+    if (!d.ok) { showToast(d.error || 'Failed to add ticker', 'err'); return; }
+
+    input.value = '';
+    showToast(`${d.symbol} added — Day 0 high $${d.day0_high.toFixed(2)}`, d.warning ? 'err' : 'ok');
+    if (d.warning) addLog(`${d.symbol}: ${d.warning}`, 'warn');
+    loadWatchlistHistory();
+  } catch (e) {
+    showToast('Failed to add ticker: ' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function fmtHistDate(dateStr) {

@@ -255,14 +255,9 @@ def fetch_positions_with_stops():
 
 # ── Scan logic ────────────────────────────────────────────────────────────────
 
-def compute_atr14(daily) -> float:
-    """
-    14-period ATR from a daily OHLC DataFrame (needs >=15 completed bars).
-    Excludes the last row, which is today's still-forming bar during market
-    hours — same convention as the 2-year volume comparison below.
-    """
-    d = daily.iloc[:-1]
-    highs, lows, closes = d["High"].tolist(), d["Low"].tolist(), d["Close"].tolist()
+def compute_atr14_asof(daily) -> float:
+    """14-period ATR computed over the given daily OHLC frame as-is (needs >=15 rows)."""
+    highs, lows, closes = daily["High"].tolist(), daily["Low"].tolist(), daily["Close"].tolist()
     if len(closes) < 15:
         return None
     trs = [
@@ -270,6 +265,15 @@ def compute_atr14(daily) -> float:
         for i in range(1, len(closes))
     ]
     return sum(trs[-14:]) / 14
+
+
+def compute_atr14(daily) -> float:
+    """
+    14-period ATR from a daily OHLC DataFrame (needs >=15 completed bars).
+    Excludes the last row, which is today's still-forming bar during market
+    hours — same convention as the 2-year volume comparison below.
+    """
+    return compute_atr14_asof(daily.iloc[:-1])
 
 
 def get_quote_and_volume(ticker: str):
@@ -319,6 +323,34 @@ def get_quote_and_volume(ticker: str):
             "max_2y_vol": max_2y_vol,
             "atr14":     atr14,
             "age_days":  age_days,
+        }
+    except Exception:
+        return None
+
+
+def get_manual_add_quote(ticker: str, day0_date: str):
+    """
+    Fetch Day 0 high/close and ATR14 as of a specific past trading day, so a
+    ticker can be manually added to today's watchlist as if the scan had
+    caught it on day0_date (mirrors the fields run_scan() records normally).
+    Returns None if the ticker or that date's bar isn't available.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        daily = t.history(period="6mo", interval="1d")
+        if daily.empty:
+            return None
+        dates = list(daily.index.strftime("%Y-%m-%d"))
+        if day0_date not in dates:
+            return None
+        idx = dates.index(day0_date)
+        atr14 = compute_atr14_asof(daily.iloc[:idx + 1])
+        if atr14 is None:
+            return None
+        return {
+            "day0_high":  round(float(daily["High"].iloc[idx]), 4),
+            "day0_price": round(float(daily["Close"].iloc[idx]), 4),
+            "atr14":      round(atr14, 4),
         }
     except Exception:
         return None
@@ -1221,6 +1253,74 @@ def get_watchlist_history():
     # Return sorted newest-first
     sorted_hist = dict(sorted(hist.items(), reverse=True))
     return jsonify(sorted_hist)
+
+
+@app.route("/api/watchlist/add", methods=["POST"])
+def add_to_watchlist():
+    """
+    Manually add a ticker to the watchlist, assuming it already qualified for
+    HVE on the previous trading day. Fetches that day's high/ATR14 so it's
+    actionable for today's breakout check (check_breakout_entries()) exactly
+    like an auto-scanned entry.
+    """
+    body   = request.get_json(silent=True) or {}
+    ticker = (body.get("symbol") or "").strip().upper()
+    if not ticker:
+        return jsonify({"ok": False, "error": "Symbol required"}), 400
+
+    now      = datetime.now(ET)
+    today    = now.strftime("%Y-%m-%d")
+    prev_day = get_prev_trading_day(today)
+
+    watchlist = load_watchlist()
+    if ticker in watchlist:
+        return jsonify({"ok": False, "error": f"{ticker} is already on the watchlist"}), 400
+
+    positions_raw = alpaca_get("/positions")
+    if not isinstance(positions_raw, list):
+        return jsonify({"ok": False, "error": "Couldn't reach Alpaca to check open positions — try again"}), 502
+    if ticker in {p["symbol"] for p in positions_raw}:
+        return jsonify({"ok": False, "error": f"{ticker} is already an open position"}), 400
+
+    q = get_manual_add_quote(ticker, prev_day)
+    if q is None:
+        return jsonify({"ok": False, "error": f"Couldn't fetch {prev_day} data for {ticker} — check the symbol"}), 400
+
+    watchlist[ticker] = {
+        "day0_date":  prev_day,
+        "day0_high":  q["day0_high"],
+        "atr14":      q["atr14"],
+        "day0_price": q["day0_price"],
+    }
+    save_watchlist(watchlist)
+
+    hist = load_watchlist_history()
+    hist.setdefault(prev_day, {})[ticker] = {
+        "day0_high":  q["day0_high"],
+        "day0_price": q["day0_price"],
+        "atr14":      q["atr14"],
+        "outcome":    "pending",
+        "fill_price": None,
+        "manual":     True,
+    }
+    save_watchlist_history(hist)
+
+    log(
+        f"{ticker}: manually added to watchlist — Day 0 ({prev_day}) high ${q['day0_high']:.2f}  ATR14=${q['atr14']:.2f}",
+        "ok",
+    )
+
+    warning = None
+    if not ((9, 30) <= (now.hour, now.minute) < (11, 0)):
+        warning = (
+            "Added, but outside the 9:30–11:00 AM ET breakout window — "
+            "it will expire on the next check instead of triggering a buy."
+        )
+
+    return jsonify({
+        "ok": True, "symbol": ticker, "day0_date": prev_day,
+        "day0_high": q["day0_high"], "atr14": q["atr14"], "warning": warning,
+    })
 
 
 @app.route("/api/orders/stop", methods=["POST"])
