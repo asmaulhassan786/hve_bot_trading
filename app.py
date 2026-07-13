@@ -85,6 +85,9 @@ def kv_load(key: str, file_path: str, default):
             return value if value is not None else default
         except Exception as e:
             print(f"kv_load({key}) redis error, falling back to default: {e}")
+            # Avoid recursion: log() itself calls kv_load("activity_log", ...).
+            if key != "activity_log":
+                log(f"Redis read failed for '{key}' ({e}) — showing empty/stale data until it recovers", "error")
             return default
     try:
         with open(file_path) as f:
@@ -101,6 +104,8 @@ def kv_save(key: str, file_path: str, value):
             return
         except Exception as e:
             print(f"kv_save({key}) redis error, data not persisted: {e}")
+            if key != "activity_log":
+                log(f"Redis write failed for '{key}' ({e}) — this update was NOT saved", "error")
             return
     with open(file_path, "w") as f:
         json.dump(value, f, indent=2)
