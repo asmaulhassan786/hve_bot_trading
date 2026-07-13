@@ -1024,6 +1024,19 @@ def fetch_alpaca_movers():
 
 def run_scan(source: str = None):
     """
+    Entry point run in a background thread — wraps _run_scan() so an
+    unexpected exception gets logged to the activity feed instead of
+    silently killing the thread partway through (e.g. after tickers have
+    already been logged as QUALIFIED but before they're saved).
+    """
+    try:
+        _run_scan(source)
+    except Exception as e:
+        log(f"Scan failed with an unexpected error: {e}", "error")
+
+
+def _run_scan(source: str = None):
+    """
     source='alpaca' — pull from Alpaca's Market Data movers endpoint (used in automated mode)
     source='manual' — use the user's ticker list (used in manual mode)
     source=None     — auto-detect based on saved mode setting
@@ -1102,7 +1115,11 @@ def run_scan(source: str = None):
 
     # ── Save to watchlist for next-day breakout entry ─────────────────────────
     # Strategy: buy on Day 1 only if price breaks above Day 0 high before 11 AM ET.
-    existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
+    try:
+        existing_positions = {p["symbol"] for p in (alpaca_get("/positions") or [])}
+    except Exception as e:
+        log(f"Couldn't check open positions ({e}) — proceeding as if none are open", "warn")
+        existing_positions = set()
     watchlist = load_watchlist()
 
     added = []
